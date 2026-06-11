@@ -1,6 +1,6 @@
 # Trex
 
-Rust genome assembler (Illumina **Phase-1** first). Product language and policies live in [`CONTEXT.md`](CONTEXT.md). Pipeline architecture and diagrams live in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Rust genome assembler focused on the **Phase-2 Illumina endgame**, with Phase-1 kept as a non-relaxing compatibility and benchmark layer. Product language and policies live in [`CONTEXT.md`](CONTEXT.md). Pipeline architecture and diagrams live in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Layout
 
