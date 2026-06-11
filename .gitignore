@@ -1,3 +1,4 @@
 /target
+/data
 /fuzz/target
 /fuzz/Cargo.lock

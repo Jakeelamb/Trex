@@ -106,3 +106,86 @@ args = [
   "--out-dir",
   "target/benchmarks/phix174/trex",
 ]
+
+[[rows]]
+id = "ecoli_mg1655_srr001666_1k_pairs"
+technology = "illumina_pe"
+organism = "Escherichia coli str. K-12 substr. MG1655"
+license = "public_ena"
+provenance = "ENA SRR001666; first 1000 read pairs prepared by xtask fetch-data from md5-pinned FASTQ sources"
+depth_class = "bacterial_real_reads_profile_1k_pairs"
+ci_tier = "manual"
+external_data = "ecoli_mg1655_srr001666"
+fixtures = [
+  "data/benchmarks/ecoli_mg1655_srr001666/r1.1000.fq",
+  "data/benchmarks/ecoli_mg1655_srr001666/r2.1000.fq",
+]
+digest_manifest = "tools/manifest.toml"
+manifest_table = "external.ecoli_mg1655_srr001666_1k_pairs"
+optional_tools = ["minimap2", "quast"]
+artifacts = [
+  "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/contigs.fa",
+  "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/unitigs.fa",
+  "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/graph.gfa",
+]
+notes = "First larger bacterial biological read row. The full source is 7,047,668 paired spots / 507,432,096 bases; this governed row uses a bounded 1k-pair profile subset."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/ecoli_mg1655_srr001666/r1.1000.fq",
+  "--r2",
+  "data/benchmarks/ecoli_mg1655_srr001666/r2.1000.fq",
+  "--kmer-size",
+  "31",
+  "--trusted-threshold",
+  "1",
+  "--out-dir",
+  "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex",
+]
+
+[[rows]]
+id = "yeast_btt_err1308583_diploid_1k_pairs"
+technology = "illumina_pe"
+organism = "Saccharomyces cerevisiae"
+license = "public_ena; ploidy_table_cc_by_4_0"
+provenance = "ENA ERR1308583 from 1002 Yeast Genomes; BTT accession 1308583 is euploid diploid in the pinned ploidy table"
+depth_class = "diploid_eukaryotic_real_reads_profile_1k_pairs"
+ci_tier = "manual"
+external_data = "yeast_btt_err1308583"
+fixtures = [
+  "data/benchmarks/yeast_btt_err1308583/r1.1000.fq",
+  "data/benchmarks/yeast_btt_err1308583/r2.1000.fq",
+]
+digest_manifest = "tools/manifest.toml"
+manifest_table = "external.yeast_btt_err1308583_diploid_1k_pairs"
+optional_tools = ["minimap2", "quast"]
+artifacts = [
+  "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/contigs.fa",
+  "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/unitigs.fa",
+  "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/graph.gfa",
+]
+notes = "First true diploid eukaryotic biological read row. The full source is 14,550,715 paired spots / 2,870,913,582 bases; this governed row uses a bounded 1k-pair profile subset."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/yeast_btt_err1308583/r1.1000.fq",
+  "--r2",
+  "data/benchmarks/yeast_btt_err1308583/r2.1000.fq",
+  "--kmer-size",
+  "21",
+  "--trusted-threshold",
+  "1",
+  "--diploid",
+  "--out-dir",
+  "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex",
+]

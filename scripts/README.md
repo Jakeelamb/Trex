@@ -17,6 +17,7 @@
 - **Pull request**: `cargo run -p xtask -- gate --tier pr` on MSRV, stable, and nightly Rust. The gate runs `cargo run -p xtask -- validate`, `cargo clippy --workspace --all-features -- -D warnings`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `pr_smoke.sh`.
 - **Main / master / tags / schedule / workflow_dispatch**: install minimap2, then run `phase2_illumina_benchmark_gate.sh`.
 - **Nightly / manual benchmark artifact**: `cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json` includes the direct release Trex PhiX174 row under `fixtures/phix174/`.
+- **Biological manual rows**: `cargo run -p xtask -- fetch-data` prepares ignored ENA subsets from `tools/benchmark_data.toml`; then run a single row with `cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json` or `--row yeast_btt_err1308583_diploid_1k_pairs`.
 - **Optional QUAST**: set `TREX_RUN_QUAST=1` before `phase2_illumina_benchmark_gate.sh`; artifacts land under `target/quast-phase2-synthetic/`.
 
 Layer-specific exit codes from `phase2_illumina_benchmark_gate.sh`:

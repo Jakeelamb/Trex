@@ -18,7 +18,7 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 
 | Layer | Script | CI tier | Pass/fail contract |
 |-------|--------|---------|--------------------|
-| Contract validation | `cargo run -p xtask -- validate` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, references missing fixtures/scripts, fixture digests drift from `tools/manifest.toml`, or this page omits current CLI flags/scripts. |
+| Contract validation | `cargo run -p xtask -- validate` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, references missing fixtures/scripts, fixture digests drift from `tools/manifest.toml`, `tools/benchmark_data.toml` is malformed, or this page omits current CLI flags/scripts. |
 | Rust warning gate | `cargo clippy --workspace --all-features -- -D warnings` | PR and above | Keeps core crates, CLI, and Rust automation warning-clean across `1.74.0`, `stable`, and `nightly`. |
 | Rust PR gate | `cargo run -p xtask -- gate --tier pr` | PR and above | Runs validators, Clippy, the PR benchmark artifact, and `scripts/pr_smoke.sh` through the Rust automation entrypoint used by CI. |
 | Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts and direct Trex rows for a tier and writes JSON with wall time, exit codes, GNU-time max RSS when available, observed Trex counters, assembly metrics, and artifact sizes; CI uploads the JSON as a workflow artifact. |
@@ -30,9 +30,13 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 | Phase-2 haplotype metrics | `scripts/phase2_illumina_haplotype_metrics.sh` | PR and above | Compares emitted `contigs.fa` against both synthetic parents using best-parent Hamming-style checks. |
 | Layered Phase-2 gate | `scripts/phase2_illumina_benchmark_gate.sh` | main, tags, schedule, manual | Runs Phase-1 gate, diploid reference layer, graph summaries, haplotype metrics, and optional QUAST with layer-specific exit codes. |
 | PhiX174 real-reference micro row | `cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json` | nightly, manual | Runs release `trex illumina assemble` against `fixtures/phix174/reads.fq` over pinned RefSeq `NC_001422.1`, recording reads, candidate/unique/trusted k-mers, FASTA/GFA sizes, wall time, and max RSS. |
+| Biological data fetch | `cargo run -p xtask -- fetch-data` | manual/local | Prepares ignored `data/benchmarks/` subsets from ENA source files declared in `tools/benchmark_data.toml`, then verifies prepared SHA-256s where pinned. |
+| Larger bacterial row | `cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json` | manual/local | Runs release Trex on the bounded E. coli MG1655 SRR001666 paired-end subset. The full source is 7,047,668 paired spots / 507,432,096 bases. |
+| True diploid eukaryotic row | `cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_1k_pairs --out target/benchmarks/yeast-btt.json` | manual/local | Runs release Trex with `--diploid` on the bounded S. cerevisiae BTT / ERR1308583 paired-end subset. The ploidy table marks BTT accession 1308583 as euploid diploid; the full source is 14,550,715 paired spots / 2,870,913,582 bases. |
+| Profiling evidence | `docs/PROFILING.md` plus `target/profiles/` artifacts | manual/local | Records time/RSS/flamegraph commands, current hot symbols, and biological-row blockers without committing raw profiler output. |
 | Optional QUAST row | `scripts/reference_quast.sh` | opt-in local/manual/nightly | Runs QUAST or MetaQUAST when `TREX_RUN_QUAST=1` and the tool is installed; `TREX_QUAST_MIN_CONTIG` and `TREX_QUAST_MIN_ALIGNMENT` tune smoke-scale thresholds. |
 
-`tools/benchmark_matrix.toml` is the governed row list. Rows must name their minimum CI tier, fixtures, scripts, optional tools, and artifact paths so adding a biological or larger row is a schema change instead of prose. Base `artifacts` are reported for every tier that runs the row; `pr_artifacts`, `main_artifacts`, `nightly_artifacts`, and `manual_artifacts` are reported only for that tier.
+`tools/benchmark_matrix.toml` is the governed row list. Rows must name their minimum CI tier, fixtures, scripts or direct Trex invocation, optional tools, and artifact paths so adding a biological or larger row is a schema change instead of prose. External rows declare `external_data` and are backed by `tools/benchmark_data.toml`; their ignored `data/` fixtures are verified when present but are not required for default CI. Base `artifacts` are reported for every tier that runs the row; `pr_artifacts`, `main_artifacts`, `nightly_artifacts`, and `manual_artifacts` are reported only for that tier.
 
 ## Rust Automation
 
@@ -42,9 +46,12 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 cargo run -p xtask -- validate
 cargo run -p xtask -- validate-matrix
 cargo run -p xtask -- validate-capabilities
+cargo run -p xtask -- validate-data
+cargo run -p xtask -- fetch-data
 cargo run -p xtask -- gate --tier pr
 cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json
 cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json
+cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json
 cargo run -p xtask -- generate-reads --reference fixtures/phix174/reference.fa --out fixtures/phix174/reads.fq --read-len 150 --step 50 --circular
 ```
 

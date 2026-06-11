@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -26,10 +26,14 @@ enum Cmd {
     ValidateMatrix,
     /// Validate docs/CAPABILITIES.md against CLI flags and scripts.
     ValidateCapabilities,
+    /// Validate tools/benchmark_data.toml.
+    ValidateData,
     /// Run benchmark matrix scripts for one tier and write a JSON artifact.
     Bench {
         #[arg(long, value_enum, default_value_t = Tier::Pr)]
         tier: Tier,
+        #[arg(long)]
+        row: Option<String>,
         #[arg(long, default_value = "target/benchmarks/matrix.json")]
         out: PathBuf,
     },
@@ -50,6 +54,11 @@ enum Cmd {
     Gate {
         #[arg(long, value_enum, default_value_t = Tier::Pr)]
         tier: Tier,
+    },
+    /// Fetch and prepare ignored external benchmark data subsets.
+    FetchData {
+        #[arg(long)]
+        dataset: Option<String>,
     },
 }
 
@@ -79,6 +88,7 @@ struct Row {
     depth_class: Option<String>,
     ci_tier: Option<Tier>,
     fixtures: Option<Vec<String>>,
+    external_data: Option<String>,
     digest_manifest: Option<String>,
     manifest_table: Option<String>,
     pr_scripts: Option<Vec<String>>,
@@ -101,6 +111,54 @@ struct TrexBench {
     args: Vec<String>,
     out_dir: String,
     reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataCatalog {
+    schema_version: u64,
+    #[serde(default)]
+    datasets: Vec<DataSet>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataSet {
+    id: String,
+    scientific_name: String,
+    source: String,
+    study_accession: String,
+    run_accession: String,
+    sample_accession: String,
+    experiment_accession: String,
+    library_strategy: String,
+    library_layout: String,
+    instrument_model: String,
+    read_count: u64,
+    base_count: u64,
+    ploidy: String,
+    license: String,
+    provenance_url: String,
+    ploidy_provenance_url: Option<String>,
+    notes: String,
+    files: Vec<DataFile>,
+    #[serde(default)]
+    prepared: Vec<PreparedDataFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataFile {
+    role: String,
+    url: String,
+    md5: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreparedDataFile {
+    role: String,
+    source_role: String,
+    path: String,
+    records: usize,
+    sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -156,6 +214,7 @@ struct AssemblyMetrics {
     kmer_size: Option<usize>,
     candidate_kmers: Option<usize>,
     reads: Option<FastqStats>,
+    r2_reads: Option<FastqStats>,
     reference: Option<FastaStats>,
     contigs: Option<FastaStats>,
     unitigs: Option<FastaStats>,
@@ -202,10 +261,12 @@ fn main() -> DynResult<()> {
         Cmd::Validate => {
             validate_matrix(&root)?;
             validate_capabilities(&root)?;
+            validate_data_catalog(&root)?;
         }
         Cmd::ValidateMatrix => validate_matrix(&root)?,
         Cmd::ValidateCapabilities => validate_capabilities(&root)?,
-        Cmd::Bench { tier, out } => run_bench(&root, tier, &out)?,
+        Cmd::ValidateData => validate_data_catalog(&root)?,
+        Cmd::Bench { tier, row, out } => run_bench(&root, tier, row.as_deref(), &out)?,
         Cmd::GenerateReads {
             reference,
             out,
@@ -214,6 +275,7 @@ fn main() -> DynResult<()> {
             circular,
         } => generate_reads(&root, &reference, &out, read_len, step, circular)?,
         Cmd::Gate { tier } => run_gate(&root, tier)?,
+        Cmd::FetchData { dataset } => fetch_data(&root, dataset.as_deref())?,
     }
     Ok(())
 }
@@ -232,8 +294,25 @@ fn load_matrix(root: &Path) -> DynResult<Matrix> {
     Ok(toml::from_str(&text)?)
 }
 
+fn load_data_catalog(root: &Path) -> DynResult<DataCatalog> {
+    let path = root.join("tools/benchmark_data.toml");
+    let text = fs::read_to_string(path)?;
+    Ok(toml::from_str(&text)?)
+}
+
 fn validate_matrix(root: &Path) -> DynResult<()> {
     let matrix = load_matrix(root)?;
+    let data_catalog = load_data_catalog(root).ok();
+    let data_ids: BTreeSet<String> = data_catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .datasets
+                .iter()
+                .map(|dataset| dataset.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     if matrix.schema_version != 1 {
         return Err("benchmark_matrix.toml schema_version must be 1".into());
     }
@@ -257,9 +336,23 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
             .ci_tier
             .ok_or_else(|| format!("{row_id}: missing ci_tier"))?;
 
+        let external_data = row.external_data.as_deref();
+        if let Some(data_id) = external_data {
+            if !data_ids.contains(data_id) {
+                return Err(format!("{row_id}: unknown external_data id {data_id}").into());
+            }
+        }
+        let is_external = external_data.is_some();
+
         let fixtures = required_list(row.fixtures.as_ref(), row_id, "fixtures")?;
         for fixture in fixtures {
-            require_rel_path(root, row_id, "fixture", fixture, true)?;
+            require_rel_path(root, row_id, "fixture", fixture, !is_external)?;
+            if is_external && !fixture.starts_with("data/") {
+                return Err(format!(
+                    "{row_id}: external fixture path must live under data/: {fixture}"
+                )
+                .into());
+            }
         }
 
         let script_paths = scripts_for_any_tier(row);
@@ -299,6 +392,7 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
                 manifest,
                 row.manifest_table.as_deref().unwrap(),
                 fixtures,
+                is_external,
             )?;
         }
 
@@ -326,7 +420,7 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
             }
         }
         if let Some(trex) = row.trex.as_ref() {
-            validate_trex_bench(root, row_id, trex)?;
+            validate_trex_bench(root, row_id, trex, is_external)?;
         }
     }
 
@@ -340,6 +434,7 @@ fn verify_manifest_digests(
     manifest: &str,
     manifest_table: &str,
     fixtures: &[String],
+    allow_missing_external: bool,
 ) -> DynResult<()> {
     let text = fs::read_to_string(root.join(manifest))?;
     let value: toml::Value = toml::from_str(&text)?;
@@ -355,7 +450,11 @@ fn verify_manifest_digests(
             .get(&key)
             .and_then(toml::Value::as_str)
             .ok_or_else(|| format!("{row_id}: missing digest key {manifest_table}.{key}"))?;
-        let got = sha256_file(&root.join(fixture))?;
+        let path = root.join(fixture);
+        if allow_missing_external && !path.exists() {
+            continue;
+        }
+        let got = sha256_file(&path)?;
         if got != expected {
             return Err(format!(
                 "{row_id}: digest mismatch for {fixture}: got {got}, expected {expected}"
@@ -432,14 +531,139 @@ fn validate_capabilities(root: &Path) -> DynResult<()> {
     Ok(())
 }
 
-fn run_bench(root: &Path, tier: Tier, out: &Path) -> DynResult<()> {
+fn validate_data_catalog(root: &Path) -> DynResult<()> {
+    let catalog = load_data_catalog(root)?;
+    if catalog.schema_version != 1 {
+        return Err("benchmark_data.toml schema_version must be 1".into());
+    }
+    if catalog.datasets.is_empty() {
+        return Err("benchmark_data.toml must contain at least one [[datasets]] entry".into());
+    }
+
+    let mut ids = BTreeSet::new();
+    for dataset in &catalog.datasets {
+        if dataset.id.trim().is_empty() {
+            return Err("benchmark_data.toml dataset id must not be empty".into());
+        }
+        if !ids.insert(dataset.id.clone()) {
+            return Err(format!("duplicate benchmark dataset id {:?}", dataset.id).into());
+        }
+        for field in [
+            &dataset.scientific_name,
+            &dataset.source,
+            &dataset.study_accession,
+            &dataset.run_accession,
+            &dataset.sample_accession,
+            &dataset.experiment_accession,
+            &dataset.library_strategy,
+            &dataset.library_layout,
+            &dataset.instrument_model,
+            &dataset.ploidy,
+            &dataset.license,
+            &dataset.provenance_url,
+            &dataset.notes,
+        ] {
+            if field.trim().is_empty() {
+                return Err(format!("{}: catalog fields must not be empty", dataset.id).into());
+            }
+        }
+        if dataset.read_count == 0 || dataset.base_count == 0 {
+            return Err(format!("{}: read_count/base_count must be non-zero", dataset.id).into());
+        }
+        if !dataset.provenance_url.starts_with("https://") {
+            return Err(format!("{}: provenance_url must be https", dataset.id).into());
+        }
+        if let Some(url) = dataset.ploidy_provenance_url.as_deref() {
+            if !url.starts_with("https://") {
+                return Err(format!("{}: ploidy_provenance_url must be https", dataset.id).into());
+            }
+        }
+
+        let mut roles = BTreeSet::new();
+        for file in &dataset.files {
+            if !roles.insert(file.role.clone()) {
+                return Err(format!("{}: duplicate file role {}", dataset.id, file.role).into());
+            }
+            if !file.url.starts_with("https://") {
+                return Err(format!("{}: file URL must be https: {}", dataset.id, file.url).into());
+            }
+            if file.md5.len() != 32 || !file.md5.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("{}: invalid md5 for {}", dataset.id, file.role).into());
+            }
+            if file.bytes == 0 {
+                return Err(
+                    format!("{}: bytes must be non-zero for {}", dataset.id, file.role).into(),
+                );
+            }
+        }
+        if roles.is_empty() {
+            return Err(format!("{}: at least one source file is required", dataset.id).into());
+        }
+
+        for prepared in &dataset.prepared {
+            if !roles.contains(&prepared.source_role) {
+                return Err(format!(
+                    "{}: prepared {} references unknown source role {}",
+                    dataset.id, prepared.role, prepared.source_role
+                )
+                .into());
+            }
+            if prepared.records == 0 {
+                return Err(format!(
+                    "{}: prepared {} records must be non-zero",
+                    dataset.id, prepared.role
+                )
+                .into());
+            }
+            require_rel_path(root, &dataset.id, "prepared.path", &prepared.path, false)?;
+            if !prepared.path.starts_with("data/") {
+                return Err(format!(
+                    "{}: prepared data must live under data/: {}",
+                    dataset.id, prepared.path
+                )
+                .into());
+            }
+            if let Some(expected) = prepared.sha256.as_deref() {
+                if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(
+                        format!("{}: invalid sha256 for {}", dataset.id, prepared.role).into(),
+                    );
+                }
+                let path = root.join(&prepared.path);
+                if path.exists() {
+                    let got = sha256_file(&path)?;
+                    if got != expected {
+                        return Err(format!(
+                            "{}: prepared {} digest mismatch: got {}, expected {}",
+                            dataset.id, prepared.role, got, expected
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+    }
+
+    println!(
+        "xtask validate-data: OK ({} external datasets)",
+        catalog.datasets.len()
+    );
+    Ok(())
+}
+
+fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> DynResult<()> {
     validate_matrix(root)?;
     let matrix = load_matrix(root)?;
     let mut rows = Vec::new();
     let mut failed = false;
+    let mut matched_filter = false;
 
     for row in &matrix.rows {
         let row_id = row.id.clone().ok_or("validated row missing id")?;
+        if row_filter.map(|filter| filter != row_id).unwrap_or(false) {
+            continue;
+        }
+        matched_filter = true;
         let ci_tier = row.ci_tier.ok_or("validated row missing ci_tier")?;
         let scripts = scripts_for_tier(row, tier);
         let should_run_trex = row
@@ -491,6 +715,11 @@ fn run_bench(root: &Path, tier: Tier, out: &Path) -> DynResult<()> {
             artifacts,
         });
     }
+    if let Some(filter) = row_filter {
+        if !matched_filter {
+            return Err(format!("xtask bench: row {filter:?} not found").into());
+        }
+    }
 
     let report = BenchReport {
         schema_version: 1,
@@ -531,7 +760,7 @@ fn run_gate(root: &Path, tier: Tier) -> DynResult<()> {
         ],
     )?;
     let bench_out = format!("target/benchmarks/{}.json", tier_name(tier));
-    run_bench(root, tier, Path::new(&bench_out))?;
+    run_bench(root, tier, None, Path::new(&bench_out))?;
     if tier == Tier::Pr {
         run_command_passthrough(root, "bash", &["scripts/pr_smoke.sh"])?;
     }
@@ -581,7 +810,12 @@ fn require_rel_path(
     Ok(())
 }
 
-fn validate_trex_bench(root: &Path, row_id: &str, trex: &TrexBench) -> DynResult<()> {
+fn validate_trex_bench(
+    root: &Path,
+    row_id: &str,
+    trex: &TrexBench,
+    is_external: bool,
+) -> DynResult<()> {
     if trex.tiers.is_empty() {
         return Err(format!("{row_id}: [rows.trex].tiers must not be empty").into());
     }
@@ -590,10 +824,13 @@ fn validate_trex_bench(root: &Path, row_id: &str, trex: &TrexBench) -> DynResult
     }
     require_rel_path(root, row_id, "trex.out_dir", &trex.out_dir, false)?;
     if let Some(reference) = trex.reference.as_deref() {
-        require_rel_path(root, row_id, "trex.reference", reference, true)?;
+        require_rel_path(root, row_id, "trex.reference", reference, !is_external)?;
     }
     if let Some(r1) = value_after(&trex.args, "--r1") {
-        require_rel_path(root, row_id, "trex.--r1", r1, true)?;
+        require_rel_path(root, row_id, "trex.--r1", r1, !is_external)?;
+    }
+    if let Some(r2) = value_after(&trex.args, "--r2") {
+        require_rel_path(root, row_id, "trex.--r2", r2, !is_external)?;
     }
     match value_after(&trex.args, "--out-dir") {
         Some(out_dir) if out_dir == trex.out_dir => {}
@@ -731,7 +968,18 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let reads = value_after(&trex.args, "--r1")
         .map(|path| fastq_stats(&root.join(path), kmer_size))
         .transpose()?;
-    let candidate_kmers = reads.as_ref().and_then(|stats| stats.candidate_kmers);
+    let r2_reads = value_after(&trex.args, "--r2")
+        .map(|path| fastq_stats(&root.join(path), kmer_size))
+        .transpose()?;
+    let candidate_kmers = match (
+        reads.as_ref().and_then(|stats| stats.candidate_kmers),
+        r2_reads.as_ref().and_then(|stats| stats.candidate_kmers),
+    ) {
+        (Some(r1), Some(r2)) => Some(r1 + r2),
+        (Some(r1), None) => Some(r1),
+        (None, Some(r2)) => Some(r2),
+        (None, None) => None,
+    };
     let reference = trex
         .reference
         .as_deref()
@@ -744,6 +992,7 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         kmer_size,
         candidate_kmers,
         reads,
+        r2_reads,
         reference,
         contigs,
         unitigs,
@@ -916,6 +1165,131 @@ fn fasta_sequences(path: &Path) -> DynResult<Vec<Vec<u8>>> {
         seqs.push(cur);
     }
     Ok(seqs)
+}
+
+fn fetch_data(root: &Path, dataset_filter: Option<&str>) -> DynResult<()> {
+    validate_data_catalog(root)?;
+    let catalog = load_data_catalog(root)?;
+    let mut matched = 0usize;
+    for dataset in &catalog.datasets {
+        if let Some(filter) = dataset_filter {
+            if dataset.id != filter {
+                continue;
+            }
+        }
+        matched += 1;
+        fetch_dataset(root, dataset)?;
+    }
+    if matched == 0 {
+        return Err(format!(
+            "xtask fetch-data: no dataset matched {}",
+            dataset_filter.unwrap_or("<all>")
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn fetch_dataset(root: &Path, dataset: &DataSet) -> DynResult<()> {
+    let files: BTreeMap<&str, &DataFile> = dataset
+        .files
+        .iter()
+        .map(|file| (file.role.as_str(), file))
+        .collect();
+    for prepared in &dataset.prepared {
+        let source = files.get(prepared.source_role.as_str()).ok_or_else(|| {
+            format!(
+                "{}: prepared {} references unknown source role {}",
+                dataset.id, prepared.role, prepared.source_role
+            )
+        })?;
+        let out_path = root.join(&prepared.path);
+        let expected = prepared.sha256.as_deref();
+        if out_path.exists() {
+            let got = sha256_file(&out_path)?;
+            if expected.map(|sha| sha == got).unwrap_or(false) {
+                println!(
+                    "xtask fetch-data: {} {} already present ({got})",
+                    dataset.id, prepared.role
+                );
+                continue;
+            }
+        }
+        stream_fastq_prefix(source, &out_path, prepared.records)?;
+        validate_fastq_record_count(&out_path, prepared.records)?;
+        let got = sha256_file(&out_path)?;
+        match expected {
+            Some(expected) if expected == got => {
+                println!(
+                    "xtask fetch-data: {} {} OK ({got})",
+                    dataset.id, prepared.role
+                );
+            }
+            Some(expected) => {
+                return Err(format!(
+                    "xtask fetch-data: {} {} digest mismatch: got {}, expected {}",
+                    dataset.id, prepared.role, got, expected
+                )
+                .into());
+            }
+            None => {
+                println!(
+                    "xtask fetch-data: {} {} wrote {} records sha256={got}",
+                    dataset.id, prepared.role, prepared.records
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stream_fastq_prefix(source: &DataFile, out_path: &Path, records: usize) -> DynResult<()> {
+    let lines = records
+        .checked_mul(4)
+        .ok_or("FASTQ record count overflow")?;
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = out_path.with_extension("tmp");
+    let script = format!(
+        "curl -fsSL '{}' 2> >(grep -v 'Failure writing output to destination' >&2) | gzip -dc | awk 'NR <= {} {{ print }} NR == {} {{ exit }}' > '{}'",
+        source.url,
+        lines,
+        lines,
+        tmp.display()
+    );
+    let status = Command::new("bash").arg("-c").arg(&script).status()?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("fetch failed for {}", source.url).into());
+    }
+    fs::rename(tmp, out_path)?;
+    Ok(())
+}
+
+fn validate_fastq_record_count(path: &Path, expected_records: usize) -> DynResult<()> {
+    let text = fs::read_to_string(path)?;
+    let mut lines = text.lines();
+    let mut records = 0usize;
+    while let Some(header) = lines.next() {
+        let seq = lines.next().ok_or("truncated FASTQ sequence line")?;
+        let plus = lines.next().ok_or("truncated FASTQ plus line")?;
+        let qual = lines.next().ok_or("truncated FASTQ quality line")?;
+        if !header.starts_with('@') || !plus.starts_with('+') || seq.len() != qual.len() {
+            return Err(format!("invalid FASTQ record in {}", path.display()).into());
+        }
+        records += 1;
+    }
+    if records != expected_records {
+        return Err(format!(
+            "{}: expected {} FASTQ records, found {}",
+            path.display(),
+            expected_records,
+            records
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn generate_reads(

@@ -1,0 +1,76 @@
+# Profiling
+
+This page records measured Trex performance evidence. Keep raw profiler outputs under
+`target/profiles/`; commit only commands, summaries, and decisions.
+
+## 2026-06-10 PhiX174 Baseline
+
+Command:
+
+```bash
+mkdir -p target/profiles
+/usr/bin/time -v target/release/trex illumina assemble \
+  --r1 fixtures/phix174/reads.fq \
+  --kmer-size 31 \
+  --trusted-threshold 1 \
+  --out-dir target/profiles/phix174-baseline \
+  > target/profiles/phix174.stdout \
+  2> target/profiles/phix174.time.txt
+
+cargo flamegraph -p trex-cli --bin trex \
+  -o target/profiles/phix174-flamegraph.svg -- \
+  illumina assemble \
+  --r1 fixtures/phix174/reads.fq \
+  --kmer-size 31 \
+  --trusted-threshold 1 \
+  --out-dir target/profiles/phix174-flamegraph-run
+```
+
+Observed baseline:
+
+| Input | Reads | Candidate k-mers | Unique k-mers | Unitigs | Contigs | Wall | Max RSS |
+|-------|-------|------------------|---------------|---------|---------|------|---------|
+| PhiX174 deterministic 150 bp reads | 108 | 12,960 | 5,386 | 1 | 1 | 27.25 s | 12,668 KiB |
+
+Top `perf report` symbols from `target/profiles/phix174.perf.data`:
+
+| Symbol | Self |
+|--------|------|
+| `trex::dbg::walk::pick_best_neighbor` | 21.27% |
+| `trex::kmer::reverse_complement` | 15.70% |
+| `trex::dbg::walk::reference_contig_paths` | 7.24% |
+| `BTreeMap<Vec<u8>, ...>::insert` | 4.28% |
+| `trex::dbg::unitig::stitch_sequence` | 2.53% |
+| `malloc` / `cfree` | 2.97% combined |
+
+Immediate read:
+
+- The current passing micro benchmark is dominated by graph walking and repeated allocation-heavy
+  sequence orientation work, not FASTQ parsing.
+- `pick_best_neighbor` clones neighbor k-mers and consults `BTreeSet<Vec<u8>>` forbidden sets inside
+  greedy walks from every component seed.
+- `reverse_complement` returns a fresh `Vec<u8>` and appears both in canonicalization and stitch/orientation paths.
+- The next optimization slice should target the DBG walk representation before broad parser work.
+
+## 2026-06-10 Biological Rows
+
+Prepared with:
+
+```bash
+cargo run -p xtask -- fetch-data
+```
+
+Rows:
+
+| Row | Source | Prepared subset | Current result |
+|-----|--------|-----------------|----------------|
+| `ecoli_mg1655_srr001666_1k_pairs` | ENA `SRR001666`; 7,047,668 paired spots / 507,432,096 bases | 1,000 R1 + 1,000 R2 reads | Runs, but emits 0 unitigs / 0 contigs with `k=31`, `T=1`; `k=21`, `T=1` also emits 0 contigs. |
+| `yeast_btt_err1308583_diploid_1k_pairs` | ENA `ERR1308583`; 14,550,715 paired spots / 2,870,913,582 bases; BTT ploidy table = euploid diploid | 1,000 R1 + 1,000 R2 reads | Fails in core assembly with `incompatible forward k-mer assignments for canonical node`, even R1-only without `--diploid`. |
+
+Immediate read:
+
+- Biological data ingestion and fixture governance are now present.
+- The next correctness blocker is real-read DBG orientation/simplification behavior, especially the
+  canonical-node forward assignment conflict exposed by yeast.
+- The next performance blocker on the passing path is `dbg::walk`; profile-guided work should start
+  there while keeping biological rows as manual regressions.

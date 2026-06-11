@@ -1,0 +1,96 @@
+# External benchmark data catalog.
+#
+# These sources are intentionally not committed into git. `xtask fetch-data` prepares bounded,
+# deterministic FASTQ subsets under ignored `data/` paths and verifies prepared SHA-256 values
+# when they are present here.
+
+schema_version = 1
+
+[[datasets]]
+id = "ecoli_mg1655_srr001666"
+scientific_name = "Escherichia coli str. K-12 substr. MG1655"
+source = "ENA"
+study_accession = "SRP000220"
+run_accession = "SRR001666"
+sample_accession = "SRS000537"
+experiment_accession = "SRX000430"
+library_strategy = "WGS"
+library_layout = "PAIRED"
+instrument_model = "Illumina Genome Analyzer"
+read_count = 7047668
+base_count = 507432096
+ploidy = "haploid bacterial"
+license = "public_ena"
+provenance_url = "https://www.ebi.ac.uk/ena/browser/view/SRR001666"
+notes = "Illumina E. coli MG1655 500 bp insert paired-end library; larger bacterial performance rung."
+
+[[datasets.files]]
+role = "r1"
+url = "https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR001/SRR001666/SRR001666_1.fastq.gz"
+md5 = "5adf40fe219dc0afdf56be037d3a3ff6"
+bytes = 260786393
+
+[[datasets.files]]
+role = "r2"
+url = "https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR001/SRR001666/SRR001666_2.fastq.gz"
+md5 = "9dd454e0fb0d25f0f001cb1b1cadb544"
+bytes = 292718968
+
+[[datasets.prepared]]
+role = "r1_1000"
+source_role = "r1"
+path = "data/benchmarks/ecoli_mg1655_srr001666/r1.1000.fq"
+records = 1000
+sha256 = "47fce4d6145ff171374ee4373e6736a11e8328ba7a7ea417a155b0cc526778d8"
+
+[[datasets.prepared]]
+role = "r2_1000"
+source_role = "r2"
+path = "data/benchmarks/ecoli_mg1655_srr001666/r2.1000.fq"
+records = 1000
+sha256 = "a7f2701ffd34f157389143852c3ab02f4b7b783d0614be621fff13048609b7b9"
+
+[[datasets]]
+id = "yeast_btt_err1308583"
+scientific_name = "Saccharomyces cerevisiae"
+source = "ENA + 1002 Yeast Genomes ploidy table"
+study_accession = "ERP014555"
+run_accession = "ERR1308583"
+sample_accession = "SAMEA3895529"
+experiment_accession = "ERX1380692"
+library_strategy = "WGS"
+library_layout = "PAIRED"
+instrument_model = "Illumina HiSeq 2000"
+read_count = 14550715
+base_count = 2870913582
+ploidy = "2"
+license = "public_ena; ploidy_table_cc_by_4_0"
+provenance_url = "https://www.ebi.ac.uk/ena/browser/view/ERR1308583"
+ploidy_provenance_url = "https://auckland.figshare.com/articles/dataset/1002_Yeast_Genome_Dataset_ploidy_information/13888811"
+notes = "1002 Yeast Genomes BTT isolate; ploidy table marks BTT accession 1308583 as euploid diploid."
+
+[[datasets.files]]
+role = "r1"
+url = "https://ftp.sra.ebi.ac.uk/vol1/fastq/ERR130/003/ERR1308583/ERR1308583_1.fastq.gz"
+md5 = "7ec77abbd780546106c32dca93d2ceba"
+bytes = 1345203041
+
+[[datasets.files]]
+role = "r2"
+url = "https://ftp.sra.ebi.ac.uk/vol1/fastq/ERR130/003/ERR1308583/ERR1308583_2.fastq.gz"
+md5 = "c72368cf30f3120ef3d58b77cd4e5985"
+bytes = 1343506492
+
+[[datasets.prepared]]
+role = "r1_1000"
+source_role = "r1"
+path = "data/benchmarks/yeast_btt_err1308583/r1.1000.fq"
+records = 1000
+sha256 = "7870b03a7fed1efcb88d643a5d137c6be798100a283bdf416b8c62120eb7e4de"
+
+[[datasets.prepared]]
+role = "r2_1000"
+source_role = "r2"
+path = "data/benchmarks/yeast_btt_err1308583/r2.1000.fq"
+records = 1000
+sha256 = "efa7c89c8c387f9b9f3c239821e88b04fd9dcd2c540fbe7f8f71ae82ce2a5186"
