@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 type DynResult<T> = Result<T, Box<dyn Error>>;
 
@@ -31,6 +32,24 @@ enum Cmd {
         tier: Tier,
         #[arg(long, default_value = "target/benchmarks/matrix.json")]
         out: PathBuf,
+    },
+    /// Generate deterministic FASTQ reads from a FASTA reference.
+    GenerateReads {
+        #[arg(long)]
+        reference: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 100)]
+        read_len: usize,
+        #[arg(long, default_value_t = 25)]
+        step: usize,
+        #[arg(long, default_value_t = false)]
+        circular: bool,
+    },
+    /// Run a Rust-owned gate for a development tier.
+    Gate {
+        #[arg(long, value_enum, default_value_t = Tier::Pr)]
+        tier: Tier,
     },
 }
 
@@ -72,7 +91,16 @@ struct Row {
     main_artifacts: Option<Vec<String>>,
     nightly_artifacts: Option<Vec<String>>,
     manual_artifacts: Option<Vec<String>>,
+    trex: Option<TrexBench>,
     notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrexBench {
+    tiers: Vec<Tier>,
+    args: Vec<String>,
+    out_dir: String,
+    reference: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -88,6 +116,7 @@ struct BenchRowReport {
     id: String,
     ci_tier: Tier,
     scripts: Vec<ScriptReport>,
+    trex_runs: Vec<TrexRunReport>,
     artifacts: Vec<ArtifactReport>,
 }
 
@@ -99,6 +128,64 @@ struct ScriptReport {
     wall_ms: u128,
     time_seconds: Option<f64>,
     max_rss_kib: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct TrexRunReport {
+    command: Vec<String>,
+    exit_code: Option<i32>,
+    success: bool,
+    wall_ms: u128,
+    time_seconds: Option<f64>,
+    max_rss_kib: Option<u64>,
+    observed: Option<TrexObserved>,
+    metrics: Option<AssemblyMetrics>,
+}
+
+#[derive(Serialize)]
+struct TrexObserved {
+    reads: Option<usize>,
+    unique_kmers: Option<usize>,
+    trusted_kmers: Option<usize>,
+    unitigs: Option<usize>,
+    contigs: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct AssemblyMetrics {
+    kmer_size: Option<usize>,
+    candidate_kmers: Option<usize>,
+    reads: Option<FastqStats>,
+    reference: Option<FastaStats>,
+    contigs: Option<FastaStats>,
+    unitigs: Option<FastaStats>,
+    gfa: Option<GfaStats>,
+}
+
+#[derive(Serialize)]
+struct FastqStats {
+    records: usize,
+    total_bases: usize,
+    min_len: usize,
+    max_len: usize,
+    candidate_kmers: Option<usize>,
+}
+
+#[derive(Clone, Serialize)]
+struct FastaStats {
+    records: usize,
+    total_bases: usize,
+    min_len: usize,
+    max_len: usize,
+    n50: usize,
+}
+
+#[derive(Serialize)]
+struct GfaStats {
+    s_lines: usize,
+    l_lines: usize,
+    p_lines: usize,
+    bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -119,6 +206,14 @@ fn main() -> DynResult<()> {
         Cmd::ValidateMatrix => validate_matrix(&root)?,
         Cmd::ValidateCapabilities => validate_capabilities(&root)?,
         Cmd::Bench { tier, out } => run_bench(&root, tier, &out)?,
+        Cmd::GenerateReads {
+            reference,
+            out,
+            read_len,
+            step,
+            circular,
+        } => generate_reads(&root, &reference, &out, read_len, step, circular)?,
+        Cmd::Gate { tier } => run_gate(&root, tier)?,
     }
     Ok(())
 }
@@ -168,11 +263,23 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
         }
 
         let script_paths = scripts_for_any_tier(row);
-        if script_paths.is_empty() {
-            return Err(format!("{row_id}: at least one *_scripts list is required").into());
+        if script_paths.is_empty() && row.trex.is_none() {
+            return Err(format!(
+                "{row_id}: at least one *_scripts list or [rows.trex] is required"
+            )
+            .into());
         }
         if ci_tier == Tier::Pr && row.pr_scripts.as_deref().unwrap_or(&[]).is_empty() {
-            return Err(format!("{row_id}: ci_tier=pr requires pr_scripts").into());
+            let has_pr_trex = row
+                .trex
+                .as_ref()
+                .map(|trex| trex.tiers.contains(&Tier::Pr))
+                .unwrap_or(false);
+            if !has_pr_trex {
+                return Err(
+                    format!("{row_id}: ci_tier=pr requires pr_scripts or pr trex tier").into(),
+                );
+            }
         }
         for script in script_paths {
             require_rel_path(root, row_id, "script", script, true)?;
@@ -186,6 +293,13 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
         if let Some(manifest) = row.digest_manifest.as_deref() {
             require_rel_path(root, row_id, "digest_manifest", manifest, true)?;
             required_str(row.manifest_table.as_deref(), idx, "manifest_table")?;
+            verify_manifest_digests(
+                root,
+                row_id,
+                manifest,
+                row.manifest_table.as_deref().unwrap(),
+                fixtures,
+            )?;
         }
 
         for artifact in row.artifacts.as_deref().unwrap_or(&[]) {
@@ -211,10 +325,60 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
                 return Err(format!("{row_id}: notes must not be empty when present").into());
             }
         }
+        if let Some(trex) = row.trex.as_ref() {
+            validate_trex_bench(root, row_id, trex)?;
+        }
     }
 
     println!("xtask validate-matrix: OK ({} rows)", matrix.rows.len());
     Ok(())
+}
+
+fn verify_manifest_digests(
+    root: &Path,
+    row_id: &str,
+    manifest: &str,
+    manifest_table: &str,
+    fixtures: &[String],
+) -> DynResult<()> {
+    let text = fs::read_to_string(root.join(manifest))?;
+    let value: toml::Value = toml::from_str(&text)?;
+    let mut table = &value;
+    for part in manifest_table.split('.') {
+        table = table
+            .get(part)
+            .ok_or_else(|| format!("{row_id}: missing manifest table {manifest_table}"))?;
+    }
+    for fixture in fixtures {
+        let key = digest_key_for_fixture(fixture)?;
+        let expected = table
+            .get(&key)
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("{row_id}: missing digest key {manifest_table}.{key}"))?;
+        let got = sha256_file(&root.join(fixture))?;
+        if got != expected {
+            return Err(format!(
+                "{row_id}: digest mismatch for {fixture}: got {got}, expected {expected}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn digest_key_for_fixture(path: &str) -> DynResult<String> {
+    let path = Path::new(path);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("fixture path has no file name")?;
+    Ok(format!("{}_sha256", name.replace('.', "_")))
+}
+
+fn sha256_file(path: &Path) -> DynResult<String> {
+    let bytes = fs::read(path)?;
+    let digest = Sha256::digest(bytes);
+    Ok(format!("{digest:x}"))
 }
 
 fn validate_capabilities(root: &Path) -> DynResult<()> {
@@ -278,7 +442,12 @@ fn run_bench(root: &Path, tier: Tier, out: &Path) -> DynResult<()> {
         let row_id = row.id.clone().ok_or("validated row missing id")?;
         let ci_tier = row.ci_tier.ok_or("validated row missing ci_tier")?;
         let scripts = scripts_for_tier(row, tier);
-        if scripts.is_empty() {
+        let should_run_trex = row
+            .trex
+            .as_ref()
+            .map(|trex| trex.tiers.contains(&tier))
+            .unwrap_or(false);
+        if scripts.is_empty() && !should_run_trex {
             continue;
         }
 
@@ -289,6 +458,17 @@ fn run_bench(root: &Path, tier: Tier, out: &Path) -> DynResult<()> {
                 failed = true;
             }
             script_reports.push(report);
+        }
+
+        let mut trex_reports = Vec::new();
+        if let Some(trex) = row.trex.as_ref() {
+            if should_run_trex {
+                let report = run_trex_bench(root, trex)?;
+                if !report.success {
+                    failed = true;
+                }
+                trex_reports.push(report);
+            }
         }
 
         let artifacts = artifacts_for_tier(row, tier)
@@ -307,6 +487,7 @@ fn run_bench(root: &Path, tier: Tier, out: &Path) -> DynResult<()> {
             id: row_id,
             ci_tier,
             scripts: script_reports,
+            trex_runs: trex_reports,
             artifacts,
         });
     }
@@ -330,6 +511,29 @@ fn run_bench(root: &Path, tier: Tier, out: &Path) -> DynResult<()> {
 
     if failed {
         return Err("xtask bench: one or more scripts failed".into());
+    }
+    Ok(())
+}
+
+fn run_gate(root: &Path, tier: Tier) -> DynResult<()> {
+    validate_matrix(root)?;
+    validate_capabilities(root)?;
+    run_command_passthrough(
+        root,
+        "cargo",
+        &[
+            "clippy",
+            "--workspace",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+    let bench_out = format!("target/benchmarks/{}.json", tier_name(tier));
+    run_bench(root, tier, Path::new(&bench_out))?;
+    if tier == Tier::Pr {
+        run_command_passthrough(root, "bash", &["scripts/pr_smoke.sh"])?;
     }
     Ok(())
 }
@@ -373,6 +577,33 @@ fn require_rel_path(
     }
     if must_exist && !root.join(path).exists() {
         return Err(format!("{row_id}: {field} path does not exist: {value}").into());
+    }
+    Ok(())
+}
+
+fn validate_trex_bench(root: &Path, row_id: &str, trex: &TrexBench) -> DynResult<()> {
+    if trex.tiers.is_empty() {
+        return Err(format!("{row_id}: [rows.trex].tiers must not be empty").into());
+    }
+    if trex.args.is_empty() || trex.args.iter().any(|arg| arg.trim().is_empty()) {
+        return Err(format!("{row_id}: [rows.trex].args must be non-empty strings").into());
+    }
+    require_rel_path(root, row_id, "trex.out_dir", &trex.out_dir, false)?;
+    if let Some(reference) = trex.reference.as_deref() {
+        require_rel_path(root, row_id, "trex.reference", reference, true)?;
+    }
+    if let Some(r1) = value_after(&trex.args, "--r1") {
+        require_rel_path(root, row_id, "trex.--r1", r1, true)?;
+    }
+    match value_after(&trex.args, "--out-dir") {
+        Some(out_dir) if out_dir == trex.out_dir => {}
+        Some(out_dir) => {
+            return Err(format!(
+                "{row_id}: [rows.trex].out_dir must match --out-dir, got {out_dir}"
+            )
+            .into());
+        }
+        None => return Err(format!("{row_id}: [rows.trex].args must include --out-dir").into()),
     }
     Ok(())
 }
@@ -433,6 +664,355 @@ fn artifacts_for_tier(row: &Row, tier: Tier) -> Vec<&String> {
         artifacts.extend(tier_artifacts.iter());
     }
     artifacts
+}
+
+fn run_trex_bench(root: &Path, trex: &TrexBench) -> DynResult<TrexRunReport> {
+    run_command_passthrough(
+        root,
+        "cargo",
+        &["build", "-q", "--release", "-p", "trex-cli"],
+    )?;
+    let mut command = vec!["target/release/trex".to_string()];
+    command.extend(trex.args.clone());
+
+    println!("xtask bench: running {}", command.join(" "));
+    let start = std::time::Instant::now();
+    let output = if Path::new("/usr/bin/time").exists() {
+        let mut cmd = Command::new("/usr/bin/time");
+        cmd.current_dir(root)
+            .args(["-f", "TREX_XTASK_TIME\t%e\t%M"])
+            .args(&command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?
+    } else {
+        Command::new(root.join("target/release/trex"))
+            .current_dir(root)
+            .args(&command[1..])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?
+    };
+    let wall_ms = start.elapsed().as_millis();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let observed = parse_trex_observed(&stdout);
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (time_seconds, max_rss_kib, passthrough_stderr) = parse_time_stderr(&stderr);
+    if !passthrough_stderr.trim().is_empty() {
+        eprint!("{passthrough_stderr}");
+        if !passthrough_stderr.ends_with('\n') {
+            eprintln!();
+        }
+    }
+    let metrics = if output.status.success() {
+        Some(assembly_metrics(root, trex)?)
+    } else {
+        None
+    };
+    Ok(TrexRunReport {
+        command,
+        exit_code: output.status.code(),
+        success: output.status.success(),
+        wall_ms,
+        time_seconds,
+        max_rss_kib,
+        observed,
+        metrics,
+    })
+}
+
+fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics> {
+    let out_dir = root.join(&trex.out_dir);
+    let kmer_size =
+        value_after(&trex.args, "--kmer-size").and_then(|value| value.parse::<usize>().ok());
+    let reads = value_after(&trex.args, "--r1")
+        .map(|path| fastq_stats(&root.join(path), kmer_size))
+        .transpose()?;
+    let candidate_kmers = reads.as_ref().and_then(|stats| stats.candidate_kmers);
+    let reference = trex
+        .reference
+        .as_deref()
+        .map(|path| fasta_stats(&root.join(path)))
+        .transpose()?;
+    let contigs = fasta_stats_optional(&out_dir.join("contigs.fa"))?;
+    let unitigs = fasta_stats_optional(&out_dir.join("unitigs.fa"))?;
+    let gfa = gfa_stats_optional(&out_dir.join("graph.gfa"))?;
+    Ok(AssemblyMetrics {
+        kmer_size,
+        candidate_kmers,
+        reads,
+        reference,
+        contigs,
+        unitigs,
+        gfa,
+    })
+}
+
+fn parse_trex_observed(stdout: &str) -> Option<TrexObserved> {
+    let mut observed = TrexObserved {
+        reads: None,
+        unique_kmers: None,
+        trusted_kmers: None,
+        unitigs: None,
+        contigs: None,
+    };
+    for token in stdout.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let value = value.trim_end_matches(',');
+        let parsed = value.parse::<usize>().ok();
+        match key {
+            "reads" => observed.reads = parsed,
+            "unique_kmers" => observed.unique_kmers = parsed,
+            "trusted_kmers" => observed.trusted_kmers = parsed,
+            "unitigs" => observed.unitigs = parsed,
+            "contigs" => observed.contigs = parsed,
+            _ => {}
+        }
+    }
+    if observed.reads.is_some()
+        || observed.unique_kmers.is_some()
+        || observed.trusted_kmers.is_some()
+        || observed.unitigs.is_some()
+        || observed.contigs.is_some()
+    {
+        Some(observed)
+    } else {
+        None
+    }
+}
+
+fn fasta_stats_optional(path: &Path) -> DynResult<Option<FastaStats>> {
+    if path.exists() {
+        Ok(Some(fasta_stats(path)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn gfa_stats_optional(path: &Path) -> DynResult<Option<GfaStats>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)?;
+    let mut s_lines = 0;
+    let mut l_lines = 0;
+    let mut p_lines = 0;
+    for line in text.lines() {
+        if line.starts_with("S\t") {
+            s_lines += 1;
+        } else if line.starts_with("L\t") {
+            l_lines += 1;
+        } else if line.starts_with("P\t") {
+            p_lines += 1;
+        }
+    }
+    Ok(Some(GfaStats {
+        s_lines,
+        l_lines,
+        p_lines,
+        bytes: fs::metadata(path)?.len(),
+    }))
+}
+
+fn fasta_stats(path: &Path) -> DynResult<FastaStats> {
+    let seqs = fasta_sequences(path)?;
+    let lens: Vec<usize> = seqs.iter().map(Vec::len).collect();
+    Ok(length_stats(lens))
+}
+
+fn fastq_stats(path: &Path, kmer_size: Option<usize>) -> DynResult<FastqStats> {
+    let text = fs::read_to_string(path)?;
+    let mut records = 0;
+    let mut total_bases = 0;
+    let mut min_len = usize::MAX;
+    let mut max_len = 0;
+    let mut candidate_kmers = kmer_size.map(|_| 0usize);
+    let mut lines = text.lines();
+    while let Some(header) = lines.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let seq = lines.next().ok_or("truncated FASTQ sequence line")?;
+        let plus = lines.next().ok_or("truncated FASTQ plus line")?;
+        let qual = lines.next().ok_or("truncated FASTQ quality line")?;
+        if !header.starts_with('@') || !plus.starts_with('+') || qual.len() != seq.len() {
+            return Err(format!("invalid FASTQ record in {}", path.display()).into());
+        }
+        records += 1;
+        total_bases += seq.len();
+        min_len = min_len.min(seq.len());
+        max_len = max_len.max(seq.len());
+        if let (Some(k), Some(total)) = (kmer_size, candidate_kmers.as_mut()) {
+            if seq.len() >= k {
+                *total += seq.len() - k + 1;
+            }
+        }
+    }
+    if records == 0 {
+        min_len = 0;
+    }
+    Ok(FastqStats {
+        records,
+        total_bases,
+        min_len,
+        max_len,
+        candidate_kmers,
+    })
+}
+
+fn length_stats(mut lens: Vec<usize>) -> FastaStats {
+    if lens.is_empty() {
+        return FastaStats {
+            records: 0,
+            total_bases: 0,
+            min_len: 0,
+            max_len: 0,
+            n50: 0,
+        };
+    }
+    let records = lens.len();
+    let total_bases: usize = lens.iter().sum();
+    let min_len = *lens.iter().min().unwrap_or(&0);
+    let max_len = *lens.iter().max().unwrap_or(&0);
+    lens.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0;
+    let mut n50 = 0;
+    for len in lens {
+        acc += len;
+        if acc * 2 >= total_bases {
+            n50 = len;
+            break;
+        }
+    }
+    FastaStats {
+        records,
+        total_bases,
+        min_len,
+        max_len,
+        n50,
+    }
+}
+
+fn fasta_sequences(path: &Path) -> DynResult<Vec<Vec<u8>>> {
+    let text = fs::read_to_string(path)?;
+    let mut seqs = Vec::new();
+    let mut cur = Vec::new();
+    for line in text.lines() {
+        if line.starts_with('>') {
+            if !cur.is_empty() {
+                seqs.push(cur);
+                cur = Vec::new();
+            }
+        } else {
+            cur.extend(line.trim().as_bytes().iter().map(u8::to_ascii_uppercase));
+        }
+    }
+    if !cur.is_empty() {
+        seqs.push(cur);
+    }
+    Ok(seqs)
+}
+
+fn generate_reads(
+    root: &Path,
+    reference: &Path,
+    out: &Path,
+    read_len: usize,
+    step: usize,
+    circular: bool,
+) -> DynResult<()> {
+    if read_len == 0 || step == 0 {
+        return Err("read_len and step must be greater than zero".into());
+    }
+    let reference_path = if reference.is_absolute() {
+        reference.to_path_buf()
+    } else {
+        root.join(reference)
+    };
+    let out_path = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        root.join(out)
+    };
+    let seqs = fasta_sequences(&reference_path)?;
+    if seqs.len() != 1 {
+        return Err("generate-reads expects exactly one FASTA sequence".into());
+    }
+    let seq = &seqs[0];
+    if seq.len() < read_len {
+        return Err("reference shorter than requested read length".into());
+    }
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut body = String::new();
+    let last_start = if circular {
+        seq.len()
+    } else {
+        seq.len() - read_len + 1
+    };
+    let mut read_idx = 0usize;
+    let mut start = 0usize;
+    while start < last_start {
+        let mut read = Vec::with_capacity(read_len);
+        for offset in 0..read_len {
+            let pos = start + offset;
+            let base = if circular {
+                seq[pos % seq.len()]
+            } else {
+                seq[pos]
+            };
+            if !matches!(base, b'A' | b'C' | b'G' | b'T') {
+                return Err(format!("reference contains non-ACGT base {}", base as char).into());
+            }
+            read.push(base);
+        }
+        read_idx += 1;
+        body.push_str(&format!("@read_{read_idx:06}_start_{start}\n"));
+        body.push_str(std::str::from_utf8(&read)?);
+        body.push_str("\n+\n");
+        body.push_str(&"I".repeat(read_len));
+        body.push('\n');
+        start += step;
+    }
+    fs::write(&out_path, body)?;
+    println!(
+        "xtask generate-reads: wrote {} reads to {}",
+        read_idx,
+        out_path.display()
+    );
+    Ok(())
+}
+
+fn value_after<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find_map(|pair| (pair[0] == key).then_some(pair[1].as_str()))
+}
+
+fn tier_name(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Pr => "pr",
+        Tier::Main => "main",
+        Tier::Nightly => "nightly",
+        Tier::Manual => "manual",
+    }
+}
+
+fn run_command_passthrough(root: &Path, program: &str, args: &[&str]) -> DynResult<()> {
+    let status = Command::new(program)
+        .current_dir(root)
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} {} failed with {status}", args.join(" ")).into())
+    }
 }
 
 fn extract_assemble_flags(path: &Path) -> DynResult<BTreeSet<String>> {

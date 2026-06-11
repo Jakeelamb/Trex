@@ -26,20 +26,14 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
           components: clippy
-      - name: Contract validators
-        run: cargo run -q -p xtask -- validate
-      - name: Clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
-      - name: Benchmark matrix artifact smoke
-        run: cargo run -q -p xtask -- bench --tier pr --out target/benchmarks/pr.json
+      - name: Rust PR gate
+        run: cargo run -q -p xtask -- gate --tier pr
       - name: Upload benchmark report
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-report-${{ matrix.rust }}
           path: target/benchmarks/*.json
           if-no-files-found: error
-      - name: PR smoke
-        run: bash scripts/pr_smoke.sh
       - name: Install minimap2 (reference benchmark gate)
         if: |
           github.event_name == 'schedule'

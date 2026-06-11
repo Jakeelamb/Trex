@@ -67,3 +67,42 @@ artifacts = [
   "target/ref-free-smoke/graph.gfa",
 ]
 notes = "Phase-1 reference-free golden; see ref_free_smoke.sh."
+
+[[rows]]
+id = "phix174_real_reference"
+technology = "illumina_se"
+organism = "Escherichia phage phiX174"
+license = "public_ncbi_refseq"
+provenance = "NCBI RefSeq NC_001422.1 via E-utilities; deterministic synthetic reads generated from the pinned reference"
+depth_class = "micro_real_reference"
+ci_tier = "nightly"
+fixtures = [
+  "fixtures/phix174/reference.fa",
+  "fixtures/phix174/reads.fq",
+]
+digest_manifest = "tools/manifest.toml"
+manifest_table = "fixtures.phix174"
+optional_tools = ["minimap2", "quast"]
+artifacts = [
+  "target/benchmarks/phix174/trex/contigs.fa",
+  "target/benchmarks/phix174/trex/unitigs.fa",
+  "target/benchmarks/phix174/trex/graph.gfa",
+]
+notes = "First real-reference micro benchmark row. Reads are deterministic smoke-scale synthetic Illumina reads over a real public reference."
+
+[rows.trex]
+tiers = ["nightly", "manual"]
+out_dir = "target/benchmarks/phix174/trex"
+reference = "fixtures/phix174/reference.fa"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "fixtures/phix174/reads.fq",
+  "--kmer-size",
+  "31",
+  "--trusted-threshold",
+  "1",
+  "--out-dir",
+  "target/benchmarks/phix174/trex",
+]

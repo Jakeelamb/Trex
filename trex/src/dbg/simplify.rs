@@ -290,7 +290,7 @@ mod tests {
         };
         remove_diamond_bubbles(&mut g, &p);
 
-        assert!(g.adj.get(&b).is_none() || g.degree(&b) == 0);
+        assert!(!g.adj.contains_key(&b) || g.degree(&b) == 0);
         assert!(g.adj.contains_key(&a));
     }
 

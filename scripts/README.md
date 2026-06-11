@@ -14,8 +14,9 @@
 
 ## CI tiers
 
-- **Pull request**: `cargo run -p xtask -- validate`, `cargo clippy --workspace --all-features -- -D warnings`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `pr_smoke.sh` on MSRV, stable, and nightly Rust.
+- **Pull request**: `cargo run -p xtask -- gate --tier pr` on MSRV, stable, and nightly Rust. The gate runs `cargo run -p xtask -- validate`, `cargo clippy --workspace --all-features -- -D warnings`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `pr_smoke.sh`.
 - **Main / master / tags / schedule / workflow_dispatch**: install minimap2, then run `phase2_illumina_benchmark_gate.sh`.
+- **Nightly / manual benchmark artifact**: `cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json` includes the direct release Trex PhiX174 row under `fixtures/phix174/`.
 - **Optional QUAST**: set `TREX_RUN_QUAST=1` before `phase2_illumina_benchmark_gate.sh`; artifacts land under `target/quast-phase2-synthetic/`.
 
 Layer-specific exit codes from `phase2_illumina_benchmark_gate.sh`:
@@ -28,6 +29,6 @@ Layer-specific exit codes from `phase2_illumina_benchmark_gate.sh`:
 | 40 | Phase-2 haplotype metrics |
 | 50 | Optional QUAST |
 
-`xtask bench` writes JSON reports with script exit codes, wall-clock time, GNU-time max RSS when `/usr/bin/time` is available, and declared artifact sizes.
+`xtask bench` writes JSON reports with script exit codes, wall-clock time, GNU-time max RSS when `/usr/bin/time` is available, declared artifact sizes, and direct Trex row metrics when a matrix row declares `[rows.trex]`.
 
 See [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), [`tools/benchmark_matrix.toml`](../tools/benchmark_matrix.toml), and [`docs/CAPABILITIES.md`](../docs/CAPABILITIES.md).

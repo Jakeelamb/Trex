@@ -19,6 +19,40 @@ fn outputs_in(dir: &Path) -> AssembleOutputs {
     }
 }
 
+fn load_fasta(path: &Path) -> Vec<Vec<u8>> {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut seqs = Vec::new();
+    let mut cur = Vec::new();
+    for line in text.lines() {
+        if line.starts_with('>') {
+            if !cur.is_empty() {
+                seqs.push(cur);
+                cur = Vec::new();
+            }
+        } else {
+            cur.extend(line.trim().as_bytes().iter().map(u8::to_ascii_uppercase));
+        }
+    }
+    if !cur.is_empty() {
+        seqs.push(cur);
+    }
+    seqs
+}
+
+fn hamming(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).filter(|(x, y)| x != y).count()
+}
+
+fn best_parent_substring_hamming(query: &[u8], parent: &[u8]) -> Option<usize> {
+    if query.is_empty() || query.len() > parent.len() {
+        return None;
+    }
+    parent
+        .windows(query.len())
+        .map(|window| hamming(query, window))
+        .min()
+}
+
 #[test]
 fn assemble_single_end_counts_and_trusted() {
     let dir = tempfile::tempdir().unwrap();
@@ -127,4 +161,49 @@ fn assemble_diploid_emits_phase2_gfa_header_tag() {
         header.lines().any(|l| l.starts_with("P\t")),
         "expected at least one GFA P line: {header:?}"
     );
+}
+
+#[test]
+fn phase2_synthetic_primary_contigs_match_a_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let fixture = root.join("fixtures/phase2_synthetic/reads.fq");
+    let params = AssembleParams {
+        r1_path: fixture,
+        r2_path: None,
+        k: 4,
+        trusted_threshold: 1,
+        checkpoint_root: None,
+        resume: false,
+        strict_checkpoints: false,
+        simplify: SimplifyOverrides::default(),
+        diploid: DiploidParams {
+            enabled: true,
+            insert_mean_bp: None,
+            insert_stddev_bp: None,
+        },
+        outputs: outputs_in(dir.path()),
+    };
+    assemble_illumina(&params).unwrap();
+
+    let p1 = load_fasta(&root.join("fixtures/phase2_synthetic/parent1.fa"))
+        .into_iter()
+        .next()
+        .unwrap();
+    let p2 = load_fasta(&root.join("fixtures/phase2_synthetic/parent2.fa"))
+        .into_iter()
+        .next()
+        .unwrap();
+    let contigs = load_fasta(&dir.path().join("contigs.fa"));
+    assert!(!contigs.is_empty(), "expected at least one Phase-2 contig");
+    for contig in contigs {
+        let d1 = best_parent_substring_hamming(&contig, &p1).unwrap_or(usize::MAX);
+        let d2 = best_parent_substring_hamming(&contig, &p2).unwrap_or(usize::MAX);
+        assert_eq!(
+            d1.min(d2),
+            0,
+            "Phase-2 primary contig must stay parent-consistent: {}",
+            String::from_utf8_lossy(&contig)
+        );
+    }
 }

@@ -11,14 +11,14 @@ Trex needs architecture and product claims to have local or CI pass/fail loops. 
 ## Decisions
 
 1. **CI tiers**
-   - Pull requests run `cargo run -p xtask -- validate`, `cargo clippy --workspace --all-features -- -D warnings`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `scripts/pr_smoke.sh` on MSRV, stable, and nightly Rust.
+   - Pull requests run `cargo run -p xtask -- gate --tier pr` on MSRV, stable, and nightly Rust. The Rust gate owns validators, Clippy, the PR benchmark artifact, and `scripts/pr_smoke.sh`.
    - Pushes to `main` / `master`, tags, schedules, and manual dispatch run the full `scripts/phase2_illumina_benchmark_gate.sh` after installing minimap2.
    - QUAST remains opt-in with `TREX_RUN_QUAST=1`; it is not required for the default PR or main gate until the tool installation and artifact policy are made mandatory.
 
 2. **Matrix-as-code**
    - `tools/benchmark_matrix.toml` is a schema-validated governed matrix.
    - Every row names its minimum CI tier, fixtures, scripts, and optional artifacts or external tools.
-   - `cargo run -p xtask -- validate-matrix` fails CI when a row omits required fields or points at missing fixtures/scripts.
+   - `cargo run -p xtask -- validate-matrix` fails CI when a row omits required fields, points at missing fixtures/scripts, drifts from declared fixture SHA-256 digests, or declares a direct Trex row whose `out_dir` and CLI `--out-dir` disagree.
 
 3. **Capabilities sync**
    - `docs/CAPABILITIES.md` is the single operator capability table for CLI flags, outputs, checkpoints, benchmark scripts, stability, and deferred work.
@@ -30,7 +30,8 @@ Trex needs architecture and product claims to have local or CI pass/fail loops. 
 
 5. **Artifacts**
    - Smoke artifacts remain under `target/`.
-   - `cargo run -p xtask -- bench` writes machine-readable row reports under `target/benchmarks/`, including wall-clock time, script exit codes, max RSS where GNU time is available, and declared base plus tier-specific artifact sizes.
+   - `cargo run -p xtask -- bench` writes machine-readable row reports under `target/benchmarks/`, including wall-clock time, script exit codes, max RSS where GNU time is available, observed Trex counters, FASTQ/FASTA/GFA assembly metrics, and declared base plus tier-specific artifact sizes.
+   - Matrix rows may declare `[rows.trex]` for direct release `trex` executions when the row should measure the product binary rather than only shell script layers. The first direct row is the nightly/manual PhiX174 real-reference micro benchmark.
    - QUAST outputs are written under `target/quast-phase2-synthetic/` when the optional row runs. Uploading those artifacts from nightly CI is allowed but not mandatory in this ADR.
 
 ## Consequences

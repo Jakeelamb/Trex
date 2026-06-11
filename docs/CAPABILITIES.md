@@ -18,9 +18,10 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 
 | Layer | Script | CI tier | Pass/fail contract |
 |-------|--------|---------|--------------------|
-| Contract validation | `cargo run -p xtask -- validate` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, references missing fixtures/scripts, or this page omits current CLI flags/scripts. |
+| Contract validation | `cargo run -p xtask -- validate` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, references missing fixtures/scripts, fixture digests drift from `tools/manifest.toml`, or this page omits current CLI flags/scripts. |
 | Rust warning gate | `cargo clippy --workspace --all-features -- -D warnings` | PR and above | Keeps core crates, CLI, and Rust automation warning-clean across `1.74.0`, `stable`, and `nightly`. |
-| Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts for a tier and writes JSON with wall time, exit codes, GNU-time max RSS when available, and artifact sizes; CI uploads the JSON as a workflow artifact. |
+| Rust PR gate | `cargo run -p xtask -- gate --tier pr` | PR and above | Runs validators, Clippy, the PR benchmark artifact, and `scripts/pr_smoke.sh` through the Rust automation entrypoint used by CI. |
+| Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts and direct Trex rows for a tier and writes JSON with wall time, exit codes, GNU-time max RSS when available, observed Trex counters, assembly metrics, and artifact sizes; CI uploads the JSON as a workflow artifact. |
 | PR smoke | `scripts/pr_smoke.sh` | PR and above | Runs `scripts/ref_free_smoke.sh`, Phase-2 fixture checks, graph summaries, haplotype metrics, and `cargo test --workspace --all-features -q`. |
 | Phase-1 reference-free golden | `scripts/ref_free_smoke.sh` | PR and above | Assembles `fixtures/tiny.fq` and byte-compares `contigs.fa`, `unitigs.fa`, and `graph.gfa` against `fixtures/expected/ref_free_smoke/`. |
 | Phase-1 full benchmark gate | `scripts/benchmark_gate.sh`, `scripts/reference_smoke.sh` | main, tags, schedule, manual | Runs the reference-free golden, then checks contigs against `fixtures/tiny_ref.fa` with minimap2 when installed or substring fallback. |
@@ -28,6 +29,7 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 | Phase-2 graph summaries | `scripts/phase2_illumina_graph_summaries.sh` | PR and above | Runs `trex illumina assemble --diploid`, checks primary FASTA stats, GFA record counts, and the Phase-2 GFA header tag. |
 | Phase-2 haplotype metrics | `scripts/phase2_illumina_haplotype_metrics.sh` | PR and above | Compares emitted `contigs.fa` against both synthetic parents using best-parent Hamming-style checks. |
 | Layered Phase-2 gate | `scripts/phase2_illumina_benchmark_gate.sh` | main, tags, schedule, manual | Runs Phase-1 gate, diploid reference layer, graph summaries, haplotype metrics, and optional QUAST with layer-specific exit codes. |
+| PhiX174 real-reference micro row | `cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json` | nightly, manual | Runs release `trex illumina assemble` against `fixtures/phix174/reads.fq` over pinned RefSeq `NC_001422.1`, recording reads, candidate/unique/trusted k-mers, FASTA/GFA sizes, wall time, and max RSS. |
 | Optional QUAST row | `scripts/reference_quast.sh` | opt-in local/manual/nightly | Runs QUAST or MetaQUAST when `TREX_RUN_QUAST=1` and the tool is installed; `TREX_QUAST_MIN_CONTIG` and `TREX_QUAST_MIN_ALIGNMENT` tune smoke-scale thresholds. |
 
 `tools/benchmark_matrix.toml` is the governed row list. Rows must name their minimum CI tier, fixtures, scripts, optional tools, and artifact paths so adding a biological or larger row is a schema change instead of prose. Base `artifacts` are reported for every tier that runs the row; `pr_artifacts`, `main_artifacts`, `nightly_artifacts`, and `manual_artifacts` are reported only for that tier.
@@ -40,10 +42,13 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 cargo run -p xtask -- validate
 cargo run -p xtask -- validate-matrix
 cargo run -p xtask -- validate-capabilities
+cargo run -p xtask -- gate --tier pr
 cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json
+cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json
+cargo run -p xtask -- generate-reads --reference fixtures/phix174/reference.fa --out fixtures/phix174/reads.fq --read-len 150 --step 50 --circular
 ```
 
-The benchmark artifact is intentionally separate from biological quality claims. It proves the governed row ran and records timing/resource metadata; the row scripts decide whether assembly output passed its correctness contract.
+The benchmark artifact is intentionally separate from biological quality claims. It proves the governed row ran and records timing/resource metadata; row scripts and direct Trex row metrics decide whether assembly output passed that row's correctness contract.
 
 ## Layer Exit Codes
 
