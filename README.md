@@ -15,6 +15,7 @@ Rust genome assembler focused on the **Phase-2 Illumina endgame**, with Phase-1 
 | [`tools/manifest.toml`](tools/manifest.toml) | Pinned external tools (e.g. **minimap2**) and prepared fixture digests |
 | [`tools/benchmark_data.toml`](tools/benchmark_data.toml) | External biological benchmark catalog: ENA source files, source md5s, prepared subset SHA-256s, and ploidy provenance |
 | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) | Operator capability matrix: CLI flags, outputs, checkpoints, CI tiers, scripts, and deferred work |
+| [`docs/ASSEMBLER_FRAMEWORK.md`](docs/ASSEMBLER_FRAMEWORK.md) | Literature-informed module framework for evidence, graph IR, simplification, paths/scaffolds, quality, and deferred graph adapters |
 | [`docs/PROFILING.md`](docs/PROFILING.md) | Measured profiling baselines, hot symbols, and biological-row blockers |
 | [`literature/`](literature/) | Assembly literature archive and review queue for OLC/DBG, long-read, diploid/T2T, metagenome, polishing, and evaluation papers |
 
@@ -56,6 +57,7 @@ bash scripts/benchmark_gate.sh
 bash scripts/phase2_illumina_benchmark_gate.sh
 cargo run -p xtask -- validate
 cargo run -p xtask -- validate-data
+cargo run -p xtask -- validate-framework
 cargo run -p xtask -- fetch-data
 cargo run -p xtask -- gate --tier pr
 cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json

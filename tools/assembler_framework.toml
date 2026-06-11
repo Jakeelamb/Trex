@@ -1,0 +1,144 @@
+# Literature-informed assembler framework.
+# Validated by `cargo run -p xtask -- validate-framework`.
+
+schema_version = 1
+
+[[modules]]
+id = "evidence_ledger"
+phase = "phase2_illumina"
+status = "planned"
+summary = "Typed, scored evidence records that must exist before graph mutation or post-assembly correction."
+papers = [
+  "literature/papers/2016-lin-abruijn-long-error-prone-dbg.pdf",
+  "literature/papers/2017-koren-canu.pdf",
+  "literature/papers/2017-wick-unicycler.pdf",
+  "literature/papers/2014-walker-pilon.pdf",
+]
+current_files = [
+  "trex/src/illumina/counts.rs",
+  "trex/src/illumina/mate.rs",
+  "xtask/src/main.rs",
+]
+gates = [
+  "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json",
+]
+next_work = [
+  "Add bridge candidate records before adding mate-derived new edges.",
+  "Emit evidence counts into benchmark JSON.",
+]
+
+[[modules]]
+id = "graph_ir"
+phase = "phase2_illumina"
+status = "active"
+summary = "Canonical trusted Illumina DBG plus graph metadata and future storage adapters."
+papers = [
+  "literature/papers/2017-koren-canu.pdf",
+  "literature/papers/2017-nurk-metaspades.pdf",
+  "literature/papers/2023-li-durbin-t2t-era.pdf",
+]
+current_files = [
+  "trex/src/dbg/graph.rs",
+  "trex/src/dbg/unitig.rs",
+  "trex/src/dbg/walk.rs",
+]
+gates = [
+  "cargo test -p trex dbg::walk",
+  "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_100k_pairs --out target/benchmarks/ecoli-100k.json",
+]
+next_work = [
+  "Add copy-number and repeat annotations from node/edge multiplicity.",
+  "Profile sparse or compact graph storage after the 100k row completes in a useful local loop.",
+]
+
+[[modules]]
+id = "simplification_policy"
+phase = "phase2_illumina"
+status = "active"
+summary = "Policy-driven graph edits for tips, bubbles, diploid branch retention, and future bridge application."
+papers = [
+  "literature/papers/2017-nurk-metaspades.pdf",
+  "literature/papers/2017-wick-unicycler.pdf",
+  "literature/papers/2017-koren-canu.pdf",
+]
+current_files = [
+  "trex/src/dbg/simplify.rs",
+  "trex/src/illumina/pipeline.rs",
+]
+gates = [
+  "cargo test -p trex dbg::simplify",
+  "bash scripts/phase2_illumina_haplotype_metrics.sh",
+]
+next_work = [
+  "Return simplification decision summaries before mutating in place.",
+  "Add repeat/copy-number-aware simplification gates.",
+]
+
+[[modules]]
+id = "path_scaffold_builder"
+phase = "phase2_illumina"
+status = "active"
+summary = "Converts graph paths and evidence-backed bridges into unitigs, contigs, GFA paths, and future scaffold artifacts."
+papers = [
+  "literature/papers/2017-wick-unicycler.pdf",
+  "literature/papers/2017-koren-canu.pdf",
+  "literature/papers/2023-li-durbin-t2t-era.pdf",
+]
+current_files = [
+  "trex/src/dbg/export.rs",
+  "trex/src/dbg/walk.rs",
+  "trex/src/illumina/pipeline.rs",
+]
+gates = [
+  "bash scripts/ref_free_smoke.sh",
+  "bash scripts/phase2_illumina_graph_summaries.sh",
+]
+next_work = [
+  "Keep sequence-only postprocessing out of contigs.fa unless GFA path metadata is updated consistently.",
+  "Add scaffold output only after bridge evidence records exist.",
+]
+
+[[modules]]
+id = "assembly_quality"
+phase = "phase2_illumina"
+status = "active"
+summary = "Reference-free and reference-backed quality metrics with machine-readable artifacts."
+papers = [
+  "literature/papers/2020-rhie-merqury.pdf",
+  "literature/papers/2014-walker-pilon.pdf",
+  "literature/papers/2023-li-durbin-t2t-era.pdf",
+]
+current_files = [
+  "xtask/src/main.rs",
+  "scripts/reference_quast.sh",
+  "tools/benchmark_matrix.toml",
+]
+gates = [
+  "cargo run -p xtask -- validate",
+  "TREX_RUN_QUAST=1 cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_1k_pairs --out target/benchmarks/yeast-btt-quast.json",
+]
+next_work = [
+  "Add Merqury-style read-vs-assembly k-mer QV and completeness.",
+  "Add parent-specific k-mer metrics for diploid rows.",
+]
+
+[[modules]]
+id = "future_graph_adapters"
+phase = "phase2_deferral"
+status = "deferred"
+summary = "Explicit future adapters for A-Bruijn, overlap/string graph, sparse/minimizer DBG, and long-range phasing evidence."
+papers = [
+  "literature/papers/2016-lin-abruijn-long-error-prone-dbg.pdf",
+  "literature/papers/2023-li-durbin-t2t-era.pdf",
+]
+current_files = [
+  "docs/adr/0001-phase2-deferrals-and-primary-collapse.md",
+  "docs/adr/0002-promote-active-scope-to-phase2-illumina-endgame.md",
+]
+gates = [
+  "cargo run -p xtask -- validate-framework",
+]
+next_work = [
+  "Do not implement until the Phase-2 deferral ADR is amended.",
+  "Keep literature pressure visible without changing the active Illumina contract.",
+]

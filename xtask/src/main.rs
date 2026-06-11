@@ -28,6 +28,8 @@ enum Cmd {
     ValidateCapabilities,
     /// Validate tools/benchmark_data.toml.
     ValidateData,
+    /// Validate tools/assembler_framework.toml.
+    ValidateFramework,
     /// Run benchmark matrix scripts for one tier and write a JSON artifact.
     Bench {
         #[arg(long, value_enum, default_value_t = Tier::Pr)]
@@ -172,6 +174,25 @@ struct DataReference {
     notes: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AssemblerFramework {
+    schema_version: u64,
+    #[serde(default)]
+    modules: Vec<FrameworkModule>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FrameworkModule {
+    id: String,
+    phase: String,
+    status: String,
+    summary: String,
+    papers: Vec<String>,
+    current_files: Vec<String>,
+    gates: Vec<String>,
+    next_work: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct BenchReport {
     schema_version: u64,
@@ -287,10 +308,12 @@ fn main() -> DynResult<()> {
             validate_matrix(&root)?;
             validate_capabilities(&root)?;
             validate_data_catalog(&root)?;
+            validate_assembler_framework(&root)?;
         }
         Cmd::ValidateMatrix => validate_matrix(&root)?,
         Cmd::ValidateCapabilities => validate_capabilities(&root)?,
         Cmd::ValidateData => validate_data_catalog(&root)?,
+        Cmd::ValidateFramework => validate_assembler_framework(&root)?,
         Cmd::Bench { tier, row, out } => run_bench(&root, tier, row.as_deref(), &out)?,
         Cmd::GenerateReads {
             reference,
@@ -321,6 +344,12 @@ fn load_matrix(root: &Path) -> DynResult<Matrix> {
 
 fn load_data_catalog(root: &Path) -> DynResult<DataCatalog> {
     let path = root.join("tools/benchmark_data.toml");
+    let text = fs::read_to_string(path)?;
+    Ok(toml::from_str(&text)?)
+}
+
+fn load_assembler_framework(root: &Path) -> DynResult<AssemblerFramework> {
+    let path = root.join("tools/assembler_framework.toml");
     let text = fs::read_to_string(path)?;
     Ok(toml::from_str(&text)?)
 }
@@ -728,6 +757,87 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
         "xtask validate-data: OK ({} external datasets)",
         catalog.datasets.len()
     );
+    Ok(())
+}
+
+fn validate_assembler_framework(root: &Path) -> DynResult<()> {
+    let framework = load_assembler_framework(root)?;
+    if framework.schema_version != 1 {
+        return Err("assembler_framework.toml schema_version must be 1".into());
+    }
+    if framework.modules.is_empty() {
+        return Err("assembler_framework.toml must contain at least one [[modules]] entry".into());
+    }
+
+    let doc = fs::read_to_string(root.join("docs/ASSEMBLER_FRAMEWORK.md"))?;
+    let mut seen = BTreeSet::new();
+    for module in &framework.modules {
+        if module.id.trim().is_empty() {
+            return Err("assembler framework module id must not be empty".into());
+        }
+        if !seen.insert(module.id.clone()) {
+            return Err(format!("duplicate assembler framework module id {:?}", module.id).into());
+        }
+        for (field, value) in [
+            ("phase", &module.phase),
+            ("status", &module.status),
+            ("summary", &module.summary),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("{}: {field} must not be empty", module.id).into());
+            }
+        }
+        if !matches!(
+            module.phase.as_str(),
+            "phase1" | "phase2_illumina" | "phase2_deferral"
+        ) {
+            return Err(format!("{}: unsupported phase {}", module.id, module.phase).into());
+        }
+        if !matches!(module.status.as_str(), "active" | "planned" | "deferred") {
+            return Err(format!("{}: unsupported status {}", module.id, module.status).into());
+        }
+        validate_framework_list(root, &module.id, "papers", &module.papers, true)?;
+        validate_framework_list(
+            root,
+            &module.id,
+            "current_files",
+            &module.current_files,
+            true,
+        )?;
+        validate_framework_list(root, &module.id, "gates", &module.gates, false)?;
+        validate_framework_list(root, &module.id, "next_work", &module.next_work, false)?;
+
+        if !doc.contains(&module.id.replace('_', " ")) && !doc.contains(&module.id) {
+            return Err(format!(
+                "docs/ASSEMBLER_FRAMEWORK.md does not mention framework module {}",
+                module.id
+            )
+            .into());
+        }
+    }
+
+    println!(
+        "xtask validate-framework: OK ({} modules)",
+        framework.modules.len()
+    );
+    Ok(())
+}
+
+fn validate_framework_list(
+    root: &Path,
+    module_id: &str,
+    field: &str,
+    values: &[String],
+    paths_must_exist: bool,
+) -> DynResult<()> {
+    if values.is_empty() || values.iter().any(|value| value.trim().is_empty()) {
+        return Err(format!("{module_id}: {field} must be a non-empty list").into());
+    }
+    if paths_must_exist {
+        for value in values {
+            require_rel_path(root, module_id, field, value, true)?;
+        }
+    }
     Ok(())
 }
 
