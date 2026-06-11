@@ -6,4 +6,4 @@ Two **32 bp** parental haplotypes (`parent1.fa`, `parent2.fa`) differing at one 
 
 **`scripts/phase2_illumina_graph_summaries.sh`** runs **`trex illumina assemble --diploid`** on `reads.fq`, prints **Phase-1-style** summary statistics on **`contigs.fa`** only, and prints **Phase-2 Illumina graph summaries** (GFA record counts and the `trex-phase2-illumina` header tag).
 
-This satisfies **Phase-2 Illumina benchmark gate** requirements for **synthetic** two-parent truth in the **default CI** diploid layer until **`trex illumina assemble`** gains explicit **Phase-2 Illumina** selectors.
+This satisfies **Phase-2 Illumina benchmark gate** requirements for **synthetic** two-parent truth in the **default CI** diploid layer while `trex illumina assemble --diploid` remains experimental.

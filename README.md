@@ -12,6 +12,7 @@ Rust genome assembler focused on the **Phase-2 Illumina endgame**, with Phase-1 
 | [`scripts/`](scripts/) | Benchmark and smoke scripts; see [`scripts/README.md`](scripts/README.md) (`benchmark_gate.sh`, `phase2_illumina_benchmark_gate.sh`, …) |
 | [`fuzz/`](fuzz/) | `cargo-fuzz` harness (`parse_fastq`); see [`fuzz/README.md`](fuzz/README.md) |
 | [`tools/manifest.toml`](tools/manifest.toml) | Pinned external tools (e.g. **minimap2**) for reference benchmarks |
+| [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) | Operator capability matrix: CLI flags, outputs, checkpoints, CI tiers, scripts, and deferred work |
 
 ## Build
 
@@ -46,12 +47,15 @@ FASTA inputs are detected from path suffixes such as `.fa`, `.fasta`, `.fna` (in
 
 ```bash
 bash scripts/ref_free_smoke.sh
+bash scripts/pr_smoke.sh
 bash scripts/benchmark_gate.sh
 bash scripts/phase2_illumina_benchmark_gate.sh
+python3 tools/validate_benchmark_matrix.py
+python3 tools/validate_capabilities_doc.py
 ```
 
 `ref_free_smoke.sh` writes under `target/ref-free-smoke/` and checks byte-identical `contigs.fa`, `unitigs.fa`, and `graph.gfa` against [`fixtures/expected/ref_free_smoke/`](fixtures/expected/ref_free_smoke/). See [`fixtures/README.md`](fixtures/README.md).
 
-`phase2_illumina_benchmark_gate.sh` runs **`benchmark_gate.sh`** first, then the synthetic **two-parent** diploid reference layer and **graph summaries** on [`fixtures/phase2_synthetic/`](fixtures/phase2_synthetic/) (per **Phase-2 Illumina benchmark gate** in [`CONTEXT.md`](CONTEXT.md)). CI runs the full script on **`main`/`master`**, **tags**, **schedule**, and **workflow_dispatch**; pull requests run a faster subset without **minimap2** (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+`phase2_illumina_benchmark_gate.sh` runs **`benchmark_gate.sh`** first, then the synthetic **two-parent** diploid reference layer, graph summaries, haplotype metrics, and optional **QUAST** when `TREX_RUN_QUAST=1` (per **Phase-2 Illumina benchmark gate** in [`CONTEXT.md`](CONTEXT.md)). CI runs the full script on **`main`/`master`**, **tags**, **schedule**, and **workflow_dispatch**; pull requests run [`pr_smoke.sh`](scripts/pr_smoke.sh) without mandatory **minimap2** (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 MSRV is **1.74** (`rust-version` in workspace `Cargo.toml`); CI runs `1.74.0` and `stable`.
