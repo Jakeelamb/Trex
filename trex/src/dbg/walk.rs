@@ -1,0 +1,179 @@
+//! **Phase-1 reference contig walker**: one **vertex-simple** path per connected component,
+//! ranked by total **read-derived edge multiplicity** along arcs; ties break on **lexicographically
+//! smallest** stitched sequence (**Phase-1 contig walk score** + **Phase-1 contig tie-break**).
+//!
+//! The search is **deterministic greedy extension** from every vertex seed in the component,
+//! keeping the best scoring path found.
+
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap};
+
+use crate::dbg::graph::DbgGraph;
+use crate::dbg::unitig::stitch_sequence;
+use crate::error::GraphError;
+use crate::kmer::cmp_dna;
+
+/// Tie-breaking when two forward neighbors share the same **read-edge multiplicity** from `cur`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ContigWalkTieBreak {
+    /// **Phase-1 contig tie-break**: lexicographically smallest neighbor *k*-mer.
+    #[default]
+    Phase1Lex,
+    /// **Phase-2 Illumina (experimental)**: higher **trusted vertex multiplicity** on the neighbor, then lex smallest.
+    Phase2DiploidNodeMul,
+}
+
+fn edge_weight(g: &DbgGraph, u: &[u8], v: &[u8]) -> u64 {
+    g.adj
+        .get(u)
+        .and_then(|m| m.get(v))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn walk_edge_score(g: &DbgGraph, path: &[Vec<u8>]) -> u64 {
+    if path.len() < 2 {
+        return 0;
+    }
+    let mut s = 0u64;
+    for w in path.windows(2) {
+        s += edge_weight(g, &w[0], &w[1]);
+    }
+    s
+}
+
+fn neighbor_vertex_mul(g: &DbgGraph, nb: &[u8]) -> u64 {
+    g.node_mul.get(nb).copied().unwrap_or(0)
+}
+
+fn pick_best_neighbor(
+    g: &DbgGraph,
+    cur: &[u8],
+    forbidden: &BTreeSet<Vec<u8>>,
+    tie_break: ContigWalkTieBreak,
+) -> Option<Vec<u8>> {
+    let mut best: Option<(u64, Vec<u8>)> = None;
+    for nb in g.adj.get(cur).into_iter().flat_map(|m| m.keys()) {
+        if forbidden.contains(nb) {
+            continue;
+        }
+        let w = edge_weight(g, cur, nb);
+        match &best {
+            None => best = Some((w, nb.clone())),
+            Some((bw, bnb)) => {
+                let take = match w.cmp(bw) {
+                    Ordering::Greater => true,
+                    Ordering::Less => false,
+                    Ordering::Equal => match tie_break {
+                        ContigWalkTieBreak::Phase1Lex => cmp_dna(nb, bnb) == Ordering::Less,
+                        ContigWalkTieBreak::Phase2DiploidNodeMul => {
+                            let mn = neighbor_vertex_mul(g, nb);
+                            let mb = neighbor_vertex_mul(g, bnb);
+                            mn > mb || (mn == mb && cmp_dna(nb, bnb) == Ordering::Less)
+                        }
+                    },
+                };
+                if take {
+                    best = Some((w, nb.clone()));
+                }
+            }
+        }
+    }
+    best.map(|(_, nb)| nb)
+}
+
+/// Greedy **vertex-simple** path: extend forward from `seed`, then backward from `seed` without
+/// reusing vertices from the forward segment (except `seed`).
+fn greedy_simple_path(g: &DbgGraph, seed: &[u8], tie_break: ContigWalkTieBreak) -> Vec<Vec<u8>> {
+    let mut forward_forbidden: BTreeSet<Vec<u8>> = BTreeSet::new();
+    forward_forbidden.insert(seed.to_vec());
+
+    let mut forward: Vec<Vec<u8>> = vec![seed.to_vec()];
+    let mut cur = seed.to_vec();
+    loop {
+        match pick_best_neighbor(g, &cur, &forward_forbidden, tie_break) {
+            Some(nb) => {
+                forward_forbidden.insert(nb.clone());
+                forward.push(nb.clone());
+                cur = nb;
+            }
+            None => break,
+        }
+    }
+
+    let mut all_forbidden = forward_forbidden.clone();
+    let mut back_segments: Vec<Vec<u8>> = Vec::new();
+    cur = seed.to_vec();
+    loop {
+        match pick_best_neighbor(g, &cur, &all_forbidden, tie_break) {
+            Some(nb) => {
+                all_forbidden.insert(nb.clone());
+                back_segments.push(nb.clone());
+                cur = nb;
+            }
+            None => break,
+        }
+    }
+
+    let mut path: Vec<Vec<u8>> = back_segments.into_iter().rev().collect();
+    path.extend(forward);
+    path
+}
+
+pub fn connected_components(g: &DbgGraph) -> Vec<Vec<Vec<u8>>> {
+    let mut unseen: BTreeSet<Vec<u8>> = g.adj.keys().cloned().collect();
+    let mut comps: Vec<Vec<Vec<u8>>> = Vec::new();
+    while let Some(seed) = unseen.iter().next().cloned() {
+        unseen.remove(&seed);
+        let mut stack = vec![seed];
+        let mut comp: Vec<Vec<u8>> = Vec::new();
+        while let Some(u) = stack.pop() {
+            comp.push(u.clone());
+            if let Some(neigh) = g.adj.get(&u) {
+                for v in neigh.keys() {
+                    if unseen.remove(v) {
+                        stack.push(v.clone());
+                    }
+                }
+            }
+        }
+        comp.sort_unstable_by(|a, b| cmp_dna(a, b));
+        comps.push(comp);
+    }
+    comps.sort_unstable_by(|a, b| cmp_dna(a[0].as_slice(), b[0].as_slice()));
+    comps
+}
+
+/// One **reference contig** path per connected component (**Phase-1 disconnected graph policy**).
+pub fn reference_contig_paths(
+    g: &DbgGraph,
+    forward: &HashMap<Vec<u8>, Vec<u8>>,
+    k: usize,
+    tie_break: ContigWalkTieBreak,
+) -> Result<Vec<Vec<Vec<u8>>>, GraphError> {
+    let mut out: Vec<Vec<Vec<u8>>> = Vec::new();
+    for comp in connected_components(g) {
+        if comp.is_empty() {
+            continue;
+        }
+        let mut best: Option<(u64, Vec<u8>, Vec<Vec<u8>>)> = None;
+        for seed in &comp {
+            let path = greedy_simple_path(g, seed, tie_break);
+            let score = walk_edge_score(g, &path);
+            let seq = stitch_sequence(&path, forward, k)?;
+            let replace = match &best {
+                None => true,
+                Some((bs, bseq, _)) => {
+                    score > *bs || (score == *bs && cmp_dna(&seq, bseq) == Ordering::Less)
+                }
+            };
+            if replace {
+                best = Some((score, seq, path));
+            }
+        }
+        if let Some((_, _, path)) = best {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}

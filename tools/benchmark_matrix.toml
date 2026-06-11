@@ -1,0 +1,22 @@
+# Governed **Phase-1** / **Phase-2 Illumina** benchmark matrix (CONTEXT: benchmark matrix / allow-list).
+# Rows are expanded over time; CI defaults stay synthetic and digest-pinned via `tools/manifest.toml`.
+
+schema_version = 1
+
+[[rows]]
+id = "phase2_synthetic_local"
+technology = "illumina_pe"
+organism = "synthetic_diploid"
+license = "in_repo"
+provenance = "fixtures/phase2_synthetic"
+depth_class = "smoke"
+notes = "Default developer + PR path: substring + optional minimap2 + trex diploid assemble smoke."
+
+[[rows]]
+id = "phase1_ref_free_golden"
+technology = "illumina_se"
+organism = "golden_fixture"
+license = "in_repo"
+provenance = "fixtures used by scripts/ref_free_smoke.sh"
+depth_class = "smoke"
+notes = "Phase-1 reference-free golden; see ref_free_smoke.sh."

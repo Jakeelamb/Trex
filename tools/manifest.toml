@@ -1,0 +1,17 @@
+# Phase-1 tool pin manifest (CONTEXT: Phase-1 tool pin manifest)
+#
+# Machine-readable pins for external binaries used by reference-based benchmarks,
+# simulators, and CI scripts. Expand rows as the Phase-1 benchmark matrix grows.
+#
+# Governed matrix rows: see `tools/benchmark_matrix.toml`.
+
+[tools.minimap2]
+# Ubuntu `apt` package version varies by image; pin your CI image or record tarball SHA256.
+version = "2.26+"
+verify = "minimap2 --version"
+
+# Phase-2 Illumina synthetic CI fixtures (**Phase-1 fixture integrity** / CONTEXT: Phase-2 Illumina benchmark fixtures).
+[fixtures.phase2_synthetic]
+reads_fq_sha256 = "017987f22837c979e9344be52213c6287b4224df8e130c235249630f4629522b"
+parent1_fa_sha256 = "4f6118d275086fea228024045ea344591e9ca40db1c89ac6bd01a6a523d93c6e"
+parent2_fa_sha256 = "b29fd4e99cbe1b99a9b7c10b102be1943682a71f89cbcf313e47c3b7ec08ffe8"

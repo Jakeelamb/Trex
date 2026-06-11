@@ -1,0 +1,23 @@
+[package]
+name = "trex"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Illumina Phase-1 genome assembly core (sync library)"
+
+[dependencies]
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rayon = { workspace = true, optional = true }
+
+[features]
+default = ["parallel-kmer-sort"]
+parallel-kmer-sort = ["dep:rayon"]
+
+[dev-dependencies]
+tempfile = "3"

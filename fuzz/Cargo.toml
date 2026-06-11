@@ -1,0 +1,21 @@
+[package]
+name = "trex-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+trex = { path = "../trex" }
+
+[[bin]]
+name = "parse_fastq"
+path = "fuzz_targets/parse_fastq.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
