@@ -10,6 +10,32 @@ organism = "synthetic_diploid"
 license = "in_repo"
 provenance = "fixtures/phase2_synthetic"
 depth_class = "smoke"
+ci_tier = "pr"
+fixtures = [
+  "fixtures/phase2_synthetic/parent1.fa",
+  "fixtures/phase2_synthetic/parent2.fa",
+  "fixtures/phase2_synthetic/reads.fq",
+]
+digest_manifest = "tools/manifest.toml"
+manifest_table = "fixtures.phase2_synthetic"
+pr_scripts = [
+  "scripts/phase2_illumina_diploid_reference_layer.sh",
+  "scripts/phase2_illumina_graph_summaries.sh",
+  "scripts/phase2_illumina_haplotype_metrics.sh",
+]
+main_scripts = [
+  "scripts/phase2_illumina_benchmark_gate.sh",
+]
+nightly_scripts = [
+  "scripts/phase2_illumina_benchmark_gate.sh",
+  "scripts/reference_quast.sh",
+]
+optional_tools = ["minimap2", "quast"]
+artifacts = [
+  "target/phase2-graph-summaries/contigs.fa",
+  "target/phase2-graph-summaries/graph.gfa",
+  "target/quast-phase2-synthetic/report.tsv",
+]
 notes = "Default developer + PR path: substring + optional minimap2 + trex diploid assemble smoke."
 
 [[rows]]
@@ -19,4 +45,23 @@ organism = "golden_fixture"
 license = "in_repo"
 provenance = "fixtures used by scripts/ref_free_smoke.sh"
 depth_class = "smoke"
+ci_tier = "pr"
+fixtures = [
+  "fixtures/tiny.fq",
+  "fixtures/tiny_ref.fa",
+  "fixtures/expected/ref_free_smoke",
+]
+pr_scripts = [
+  "scripts/ref_free_smoke.sh",
+]
+main_scripts = [
+  "scripts/benchmark_gate.sh",
+  "scripts/reference_smoke.sh",
+]
+optional_tools = ["minimap2"]
+artifacts = [
+  "target/ref-free-smoke/contigs.fa",
+  "target/ref-free-smoke/unitigs.fa",
+  "target/ref-free-smoke/graph.gfa",
+]
 notes = "Phase-1 reference-free golden; see ref_free_smoke.sh."

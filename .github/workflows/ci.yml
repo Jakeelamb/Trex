@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main, master]
+    tags: ["*"]
   schedule:
     # Nightly baseline for **Phase-1 benchmark gate** + **Phase-2 Illumina benchmark gate** (CONTEXT).
     - cron: "0 6 * * *"
@@ -23,23 +24,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-      - name: cargo test
-        run: cargo test --workspace --all-features
-      - name: Phase-1 PR smoke (reference-free golden)
-        run: bash scripts/ref_free_smoke.sh
-      - name: Phase-2 Illumina diploid fixture layer
-        run: bash scripts/phase2_illumina_diploid_reference_layer.sh
-      - name: Phase-2 Illumina graph summaries (trex --diploid)
-        run: bash scripts/phase2_illumina_graph_summaries.sh
+      - name: Contract validators
+        run: |
+          python3 tools/validate_benchmark_matrix.py
+          python3 tools/validate_capabilities_doc.py
+      - name: PR smoke
+        run: bash scripts/pr_smoke.sh
       - name: Install minimap2 (reference benchmark gate)
         if: |
           github.event_name == 'schedule'
+          || github.event_name == 'workflow_dispatch'
           || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
           || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
         run: sudo apt-get update && sudo apt-get install -y minimap2
-      - name: Phase-1 reference smoke (main, tags, schedule)
+      - name: Full Phase-2 Illumina benchmark gate (main, tags, schedule, dispatch)
         if: |
           github.event_name == 'schedule'
+          || github.event_name == 'workflow_dispatch'
           || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
           || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
-        run: bash scripts/reference_smoke.sh
+        run: bash scripts/phase2_illumina_benchmark_gate.sh
