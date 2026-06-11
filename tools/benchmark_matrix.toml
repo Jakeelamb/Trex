@@ -200,6 +200,52 @@ args = [
 ]
 
 [[rows]]
+id = "ecoli_mg1655_srr001666_100k_pairs"
+technology = "illumina_pe"
+organism = "Escherichia coli str. K-12 substr. MG1655"
+license = "public_ena; public_ncbi_refseq"
+provenance = "ENA SRR001666 first 100000 read pairs plus NCBI RefSeq GCF_000005845.2 / NC_000913.3 MG1655 reference"
+depth_class = "bacterial_real_reads_profile_100k_pairs"
+ci_tier = "manual"
+external_data = "ecoli_mg1655_srr001666"
+fixtures = [
+  "data/benchmarks/ecoli_mg1655_srr001666/reference.fa",
+  "data/benchmarks/ecoli_mg1655_srr001666/r1.100000.fq",
+  "data/benchmarks/ecoli_mg1655_srr001666/r2.100000.fq",
+]
+digest_manifest = "tools/manifest.toml"
+manifest_table = "external.ecoli_mg1655_srr001666_100k_pairs"
+optional_tools = ["minimap2", "quast"]
+artifacts = [
+  "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex/contigs.fa",
+  "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex/unitigs.fa",
+  "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex/graph.gfa",
+]
+manual_artifacts = [
+  "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex-quast/report.tsv",
+]
+notes = "Higher-depth bacterial profiling rung. Still bounded for local iteration, but 10x the existing 10k-pair row and high enough to expose real DBG walk and memory-scaling costs."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex"
+reference = "data/benchmarks/ecoli_mg1655_srr001666/reference.fa"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/ecoli_mg1655_srr001666/r1.100000.fq",
+  "--r2",
+  "data/benchmarks/ecoli_mg1655_srr001666/r2.100000.fq",
+  "--kmer-size",
+  "31",
+  "--trusted-threshold",
+  "1",
+  "--out-dir",
+  "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex",
+]
+
+[[rows]]
 id = "yeast_btt_err1308583_diploid_1k_pairs"
 technology = "illumina_pe"
 organism = "Saccharomyces cerevisiae"
@@ -244,4 +290,51 @@ args = [
   "--diploid",
   "--out-dir",
   "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex",
+]
+
+[[rows]]
+id = "yeast_btt_err1308583_diploid_10k_pairs"
+technology = "illumina_pe"
+organism = "Saccharomyces cerevisiae"
+license = "public_ena; ploidy_table_cc_by_4_0"
+provenance = "ENA ERR1308583 from 1002 Yeast Genomes; BTT accession 1308583 is euploid diploid in the pinned ploidy table"
+depth_class = "diploid_eukaryotic_real_reads_profile_10k_pairs"
+ci_tier = "manual"
+external_data = "yeast_btt_err1308583"
+fixtures = [
+  "data/benchmarks/yeast_btt_err1308583/reference.fa",
+  "data/benchmarks/yeast_btt_err1308583/r1.10000.fq",
+  "data/benchmarks/yeast_btt_err1308583/r2.10000.fq",
+]
+digest_manifest = "tools/manifest.toml"
+manifest_table = "external.yeast_btt_err1308583_diploid_10k_pairs"
+optional_tools = ["minimap2", "quast"]
+artifacts = [
+  "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex/contigs.fa",
+  "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex/unitigs.fa",
+  "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex/graph.gfa",
+]
+manual_artifacts = [
+  "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex-quast/report.tsv",
+]
+notes = "Higher-depth true diploid eukaryotic profiling rung. Uses 10x the existing BTT subset while staying bounded for local manual profiling before full-run claims."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex"
+reference = "data/benchmarks/yeast_btt_err1308583/reference.fa"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/yeast_btt_err1308583/r1.10000.fq",
+  "--r2",
+  "data/benchmarks/yeast_btt_err1308583/r2.10000.fq",
+  "--kmer-size",
+  "21",
+  "--trusted-threshold",
+  "1",
+  "--diploid",
+  "--out-dir",
+  "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex",
 ]

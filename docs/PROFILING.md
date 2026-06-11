@@ -90,3 +90,14 @@ Immediate read:
 - First walk optimization removed redundant edge lookups in `pick_best_neighbor` and replaced ordered
   forbidden sets with hash membership. PhiX wall time dropped from 26.65 s to 17.42 s with unchanged
   assembly metrics.
+- SPAdes-style exact overlap merging was tested as a throwaway prototype on the E. coli 10k contigs.
+  At `k - 1` overlap it found only 37 joins, kept N50 at 36 bp, and moved max contig length from
+  44 bp to 47 bp with unchanged reference k-mer containment. That is not the current production
+  bottleneck.
+- The next data rungs are governed but manual: E. coli 100k pairs and yeast BTT diploid 10k pairs.
+  A pre-optimization E. coli 100k run was stopped after roughly 3 minutes while CPU-bound at about
+  1.3 GiB RSS, making component-walk scaling the next performance target rather than post-FASTA
+  cleanup.
+- Linear/cyclic component walking now uses one deterministic traversal plus reverse-orientation
+  scoring instead of launching a greedy walk from every vertex. The E. coli 10k regression row kept
+  identical output/reference-quality metrics and improved wall time from 6.61 s to 5.67 s.

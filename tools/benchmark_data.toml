@@ -71,6 +71,20 @@ path = "data/benchmarks/ecoli_mg1655_srr001666/r2.10000.fq"
 records = 10000
 sha256 = "b716f7982151ee23eb14d79b4f8504a2745539bfd103e362e0159d3d125a3bf2"
 
+[[datasets.prepared]]
+role = "r1_100000"
+source_role = "r1"
+path = "data/benchmarks/ecoli_mg1655_srr001666/r1.100000.fq"
+records = 100000
+sha256 = "12abc3350172bad0e33fc9606f69d56eff97dda77fd31c56add1ae5ad387f6f6"
+
+[[datasets.prepared]]
+role = "r2_100000"
+source_role = "r2"
+path = "data/benchmarks/ecoli_mg1655_srr001666/r2.100000.fq"
+records = 100000
+sha256 = "17033fb669f77c0f9535994386cfce3a49ccc78c9c110d9c91032d1eccc66232"
+
 [[datasets]]
 id = "yeast_btt_err1308583"
 scientific_name = "Saccharomyces cerevisiae"
@@ -122,3 +136,17 @@ source_role = "r2"
 path = "data/benchmarks/yeast_btt_err1308583/r2.1000.fq"
 records = 1000
 sha256 = "efa7c89c8c387f9b9f3c239821e88b04fd9dcd2c540fbe7f8f71ae82ce2a5186"
+
+[[datasets.prepared]]
+role = "r1_10000"
+source_role = "r1"
+path = "data/benchmarks/yeast_btt_err1308583/r1.10000.fq"
+records = 10000
+sha256 = "7f58ef09027d7df0050aee917d4e5b9130fcab1bd7a87e656d2e20dc8a5555e6"
+
+[[datasets.prepared]]
+role = "r2_10000"
+source_role = "r2"
+path = "data/benchmarks/yeast_btt_err1308583/r2.10000.fq"
+records = 10000
+sha256 = "a4cc4a156568bc78a9945bcb9c0a832f93d8bc583385ce17321105b41e706e4b"

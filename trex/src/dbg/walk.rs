@@ -129,6 +129,77 @@ pub fn connected_components(g: &DbgGraph) -> Vec<Vec<Vec<u8>>> {
     comps
 }
 
+fn linear_component_path(g: &DbgGraph, comp: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    if comp.is_empty() || comp.iter().any(|u| g.degree(u) > 2) {
+        return None;
+    }
+
+    let start = comp
+        .iter()
+        .filter(|u| g.degree(u) <= 1)
+        .min_by(|a, b| cmp_dna(a, b))
+        .or_else(|| comp.iter().min_by(|a, b| cmp_dna(a, b)))?
+        .clone();
+
+    let mut path = Vec::with_capacity(comp.len());
+    let mut seen: HashSet<Vec<u8>> = HashSet::with_capacity(comp.len());
+    let mut prev: Option<Vec<u8>> = None;
+    let mut cur = start;
+
+    loop {
+        if !seen.insert(cur.clone()) {
+            break;
+        }
+        path.push(cur.clone());
+
+        let next = g.adj.get(&cur).and_then(|neigh| {
+            neigh
+                .keys()
+                .filter(|nb| prev.as_ref().map(|p| *nb != p).unwrap_or(true))
+                .find(|nb| !seen.contains(*nb))
+                .cloned()
+        });
+        let Some(nxt) = next else {
+            break;
+        };
+        prev = Some(cur);
+        cur = nxt;
+    }
+
+    if path.len() == comp.len() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn pick_best_stitchable_path(
+    g: &DbgGraph,
+    forward: &HashMap<Vec<u8>, Vec<u8>>,
+    k: usize,
+    candidates: Vec<Vec<Vec<u8>>>,
+) -> Result<Option<Vec<Vec<u8>>>, GraphError> {
+    let mut best: Option<(u64, Vec<u8>, Vec<Vec<u8>>)> = None;
+    for path in candidates {
+        let score = walk_edge_score(g, &path);
+        let seq = match stitch_sequence(&path, forward, k) {
+            Ok(seq) => seq,
+            Err(GraphError::OrientationConflict) => continue,
+            Err(e) => return Err(e),
+        };
+        let replace = match &best {
+            None => true,
+            Some((bs, bseq, _)) => {
+                score > *bs || (score == *bs && cmp_dna(&seq, bseq) == Ordering::Less)
+            }
+        };
+        if replace {
+            best = Some((score, seq, path));
+        }
+    }
+    Ok(best.map(|(_, _, path)| path))
+}
+
 /// One **reference contig** path per connected component (**Phase-1 disconnected graph policy**).
 pub fn reference_contig_paths(
     g: &DbgGraph,
@@ -141,28 +212,73 @@ pub fn reference_contig_paths(
         if comp.is_empty() {
             continue;
         }
-        let mut best: Option<(u64, Vec<u8>, Vec<Vec<u8>>)> = None;
-        for seed in &comp {
-            let path = greedy_simple_path(g, seed, tie_break);
-            let score = walk_edge_score(g, &path);
-            let seq = match stitch_sequence(&path, forward, k) {
-                Ok(seq) => seq,
-                Err(GraphError::OrientationConflict) => continue,
-                Err(e) => return Err(e),
-            };
-            let replace = match &best {
-                None => true,
-                Some((bs, bseq, _)) => {
-                    score > *bs || (score == *bs && cmp_dna(&seq, bseq) == Ordering::Less)
-                }
-            };
-            if replace {
-                best = Some((score, seq, path));
-            }
-        }
-        if let Some((_, _, path)) = best {
+        let best = if let Some(path) = linear_component_path(g, &comp) {
+            let mut rev = path.clone();
+            rev.reverse();
+            pick_best_stitchable_path(g, forward, k, vec![path, rev])?
+        } else {
+            let candidates = comp
+                .iter()
+                .map(|seed| greedy_simple_path(g, seed, tie_break))
+                .collect();
+            pick_best_stitchable_path(g, forward, k, candidates)?
+        };
+        if let Some(path) = best {
             out.push(path);
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+
+    use crate::dbg::stitch_sequence;
+
+    fn graph_with_nodes(k: usize, nodes: &[&[u8]]) -> DbgGraph {
+        DbgGraph::new(k, {
+            let mut mm = BTreeMap::new();
+            for node in nodes {
+                mm.insert((*node).to_vec(), 1);
+            }
+            mm
+        })
+    }
+
+    #[test]
+    fn linear_component_path_walks_once_from_endpoint() {
+        let a = b"AAAA";
+        let b = b"AAAC";
+        let c = b"AACC";
+        let mut g = graph_with_nodes(4, &[a, b, c]);
+        g.add_undirected_edge(a, b, 1).unwrap();
+        g.add_undirected_edge(b, c, 1).unwrap();
+        let comp = vec![a.to_vec(), b.to_vec(), c.to_vec()];
+
+        let path = linear_component_path(&g, &comp).expect("linear path");
+        assert_eq!(path, comp);
+    }
+
+    #[test]
+    fn reference_paths_keep_linear_component_sequence() {
+        let a = b"AAAA";
+        let b = b"AAAC";
+        let c = b"AACC";
+        let mut g = graph_with_nodes(4, &[a, b, c]);
+        g.add_undirected_edge(a, b, 1).unwrap();
+        g.add_undirected_edge(b, c, 1).unwrap();
+        let mut forward = HashMap::new();
+        for node in [a, b, c] {
+            forward.insert(node.to_vec(), node.to_vec());
+        }
+
+        let paths = reference_contig_paths(&g, &forward, 4, ContigWalkTieBreak::Phase1Lex)
+            .expect("reference paths");
+        assert_eq!(paths.len(), 1);
+        let seq = stitch_sequence(&paths[0], &forward, 4).expect("stitched");
+        assert_eq!(seq, b"AAAACC");
+    }
 }
