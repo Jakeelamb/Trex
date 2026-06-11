@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use trex::illumina::pipeline::{assemble_illumina, AssembleOutputs, AssembleParams, DiploidParams, SimplifyOverrides};
+use trex::illumina::pipeline::{
+    assemble_illumina, AssembleOutputs, AssembleParams, DiploidParams, SimplifyOverrides,
+};
 
 fn write_tmp(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
     let p = dir.join(name);

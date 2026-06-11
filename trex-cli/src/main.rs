@@ -232,25 +232,20 @@ async fn main() -> std::process::ExitCode {
                     .unwrap_or_else(|| PathBuf::from("graph.gfa"));
 
                 let simplify = SimplifyOverrides {
-                    max_tip_bases: max_tip_bases.or(file_cfg.simplify.as_ref().and_then(|s| s.max_tip_bases)),
-                    tip_max_multiplicity: tip_max_multiplicity.or(
-                        file_cfg
-                            .simplify
-                            .as_ref()
-                            .and_then(|s| s.tip_max_multiplicity),
-                    ),
-                    max_bubble_vertices: max_bubble_vertices.or(
-                        file_cfg
-                            .simplify
-                            .as_ref()
-                            .and_then(|s| s.max_bubble_vertices),
-                    ),
-                    max_bubble_internal_bases: max_bubble_internal_bases.or(
-                        file_cfg
-                            .simplify
-                            .as_ref()
-                            .and_then(|s| s.max_bubble_internal_bases),
-                    ),
+                    max_tip_bases: max_tip_bases
+                        .or(file_cfg.simplify.as_ref().and_then(|s| s.max_tip_bases)),
+                    tip_max_multiplicity: tip_max_multiplicity.or(file_cfg
+                        .simplify
+                        .as_ref()
+                        .and_then(|s| s.tip_max_multiplicity)),
+                    max_bubble_vertices: max_bubble_vertices.or(file_cfg
+                        .simplify
+                        .as_ref()
+                        .and_then(|s| s.max_bubble_vertices)),
+                    max_bubble_internal_bases: max_bubble_internal_bases.or(file_cfg
+                        .simplify
+                        .as_ref()
+                        .and_then(|s| s.max_bubble_internal_bases)),
                 };
 
                 let diploid_params = DiploidParams {
@@ -260,18 +255,10 @@ async fn main() -> std::process::ExitCode {
                             .as_ref()
                             .and_then(|d| d.enabled)
                             .unwrap_or(false),
-                    insert_mean_bp: insert_mean_bp.or(
-                        file_cfg
-                            .diploid
-                            .as_ref()
-                            .and_then(|d| d.insert_mean_bp),
-                    ),
-                    insert_stddev_bp: insert_stddev_bp.or(
-                        file_cfg
-                            .diploid
-                            .as_ref()
-                            .and_then(|d| d.insert_stddev_bp),
-                    ),
+                    insert_mean_bp: insert_mean_bp
+                        .or(file_cfg.diploid.as_ref().and_then(|d| d.insert_mean_bp)),
+                    insert_stddev_bp: insert_stddev_bp
+                        .or(file_cfg.diploid.as_ref().and_then(|d| d.insert_stddev_bp)),
                 };
 
                 let params = AssembleParams {
@@ -310,10 +297,7 @@ async fn run_assemble(params: AssembleParams) -> Result<(), TrexError> {
     let out = spawn_blocking(move || assemble_illumina(&params))
         .await
         .map_err(|join_err| {
-            TrexError::Ingest(IngestError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                join_err,
-            )))
+            TrexError::Ingest(IngestError::Io(std::io::Error::other(join_err)))
         })??;
     tracing::info!(
         reads = out.reads.len(),

@@ -37,7 +37,7 @@ impl SimplifyParams {
         Self {
             max_tip_bases: (3 * k).max(8),
             tip_max_multiplicity: 2,
-            max_bubble_vertices: (2 * k).max(8).min(64),
+            max_bubble_vertices: (2 * k).clamp(8, 64),
             max_bubble_internal_bases: (8 * k).max(32),
         }
     }
@@ -125,11 +125,7 @@ pub fn assert_no_self_loops(graph: &DbgGraph) -> Result<(), crate::error::GraphE
 }
 
 fn edge_weight(g: &DbgGraph, u: &[u8], v: &[u8]) -> u64 {
-    g.adj
-        .get(u)
-        .and_then(|m| m.get(v))
-        .copied()
-        .unwrap_or(0)
+    g.adj.get(u).and_then(|m| m.get(v)).copied().unwrap_or(0)
 }
 
 fn branch_score(g: &DbgGraph, u: &[u8], x: &[u8], m: &[u8]) -> u64 {

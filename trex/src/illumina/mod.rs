@@ -14,6 +14,7 @@ pub mod read;
 
 pub use checkpoint::{CheckpointRoot, GraphCheckpointIdentity};
 pub use pipeline::{
-    assemble_illumina, AssembleOutputs, AssembleParams, AssembleResult, DiploidParams, SimplifyOverrides,
+    assemble_illumina, AssembleOutputs, AssembleParams, AssembleResult, DiploidParams,
+    SimplifyOverrides,
 };
 pub use read::Read;

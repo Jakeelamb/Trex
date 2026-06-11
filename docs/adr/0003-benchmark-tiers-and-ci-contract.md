@@ -11,7 +11,7 @@ Trex needs architecture and product claims to have local or CI pass/fail loops. 
 ## Decisions
 
 1. **CI tiers**
-   - Pull requests run `cargo run -p xtask -- validate`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `scripts/pr_smoke.sh` on MSRV and stable Rust.
+   - Pull requests run `cargo run -p xtask -- validate`, `cargo clippy --workspace --all-features -- -D warnings`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `scripts/pr_smoke.sh` on MSRV, stable, and nightly Rust.
    - Pushes to `main` / `master`, tags, schedules, and manual dispatch run the full `scripts/phase2_illumina_benchmark_gate.sh` after installing minimap2.
    - QUAST remains opt-in with `TREX_RUN_QUAST=1`; it is not required for the default PR or main gate until the tool installation and artifact policy are made mandatory.
 

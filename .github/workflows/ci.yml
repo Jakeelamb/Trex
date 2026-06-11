@@ -19,15 +19,25 @@ jobs:
         rust:
           - 1.74.0
           - stable
+          - nightly
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
+          components: clippy
       - name: Contract validators
         run: cargo run -q -p xtask -- validate
+      - name: Clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
       - name: Benchmark matrix artifact smoke
         run: cargo run -q -p xtask -- bench --tier pr --out target/benchmarks/pr.json
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report-${{ matrix.rust }}
+          path: target/benchmarks/*.json
+          if-no-files-found: error
       - name: PR smoke
         run: bash scripts/pr_smoke.sh
       - name: Install minimap2 (reference benchmark gate)

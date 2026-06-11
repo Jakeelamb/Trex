@@ -29,11 +29,7 @@ pub fn fastq_record_id(header_line: &[u8]) -> Result<String, IngestError> {
 pub fn parse_fastq(content: &[u8]) -> Result<Vec<RawFastqRecord>, IngestError> {
     let mut records = Vec::new();
     let mut lines = content.split(|&b| b == b'\n');
-    loop {
-        let header = match lines.next() {
-            Some(h) => h,
-            None => break,
-        };
+    while let Some(header) = lines.next() {
         let header = trim_cr(header);
         if header.is_empty() {
             continue;

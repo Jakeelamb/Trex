@@ -14,7 +14,7 @@
 
 ## CI tiers
 
-- **Pull request**: `cargo run -p xtask -- validate`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `pr_smoke.sh` on MSRV and stable Rust.
+- **Pull request**: `cargo run -p xtask -- validate`, `cargo clippy --workspace --all-features -- -D warnings`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `pr_smoke.sh` on MSRV, stable, and nightly Rust.
 - **Main / master / tags / schedule / workflow_dispatch**: install minimap2, then run `phase2_illumina_benchmark_gate.sh`.
 - **Optional QUAST**: set `TREX_RUN_QUAST=1` before `phase2_illumina_benchmark_gate.sh`; artifacts land under `target/quast-phase2-synthetic/`.
 

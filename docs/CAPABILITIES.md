@@ -19,7 +19,8 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 | Layer | Script | CI tier | Pass/fail contract |
 |-------|--------|---------|--------------------|
 | Contract validation | `cargo run -p xtask -- validate` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, references missing fixtures/scripts, or this page omits current CLI flags/scripts. |
-| Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts for a tier and writes JSON with wall time, exit codes, GNU-time max RSS when available, and artifact sizes. |
+| Rust warning gate | `cargo clippy --workspace --all-features -- -D warnings` | PR and above | Keeps core crates, CLI, and Rust automation warning-clean across `1.74.0`, `stable`, and `nightly`. |
+| Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts for a tier and writes JSON with wall time, exit codes, GNU-time max RSS when available, and artifact sizes; CI uploads the JSON as a workflow artifact. |
 | PR smoke | `scripts/pr_smoke.sh` | PR and above | Runs `scripts/ref_free_smoke.sh`, Phase-2 fixture checks, graph summaries, haplotype metrics, and `cargo test --workspace --all-features -q`. |
 | Phase-1 reference-free golden | `scripts/ref_free_smoke.sh` | PR and above | Assembles `fixtures/tiny.fq` and byte-compares `contigs.fa`, `unitigs.fa`, and `graph.gfa` against `fixtures/expected/ref_free_smoke/`. |
 | Phase-1 full benchmark gate | `scripts/benchmark_gate.sh`, `scripts/reference_smoke.sh` | main, tags, schedule, manual | Runs the reference-free golden, then checks contigs against `fixtures/tiny_ref.fa` with minimap2 when installed or substring fallback. |

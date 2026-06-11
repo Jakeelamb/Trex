@@ -100,7 +100,12 @@ fn extract_one_cycle(
     used: &mut BTreeSet<(Vec<u8>, Vec<u8>)>,
     out: &mut Vec<Vec<Vec<u8>>>,
 ) {
-    let start = graph.adj.keys().min_by(|a, b| cmp_dna(a, b)).unwrap().clone();
+    let start = graph
+        .adj
+        .keys()
+        .min_by(|a, b| cmp_dna(a, b))
+        .unwrap()
+        .clone();
     let v0 = min_neighbor(graph, &start);
     let e0 = norm_edge(&start, &v0);
     if used.contains(&e0) {
@@ -167,11 +172,7 @@ pub fn stitch_sequence(
     }
     let f0 = pick_forward(path[0].as_slice(), forward)?;
     let rc0 = reverse_complement(&f0);
-    let mut starters: Vec<Vec<u8>> = if f0 == rc0 {
-        vec![f0]
-    } else {
-        vec![f0, rc0]
-    };
+    let mut starters: Vec<Vec<u8>> = if f0 == rc0 { vec![f0] } else { vec![f0, rc0] };
     starters.sort_by(|a, b| cmp_dna(a, b));
     starters.dedup();
 
@@ -201,10 +202,10 @@ fn stitch_from(
         let cand = pick_forward(cn.as_slice(), forward)?;
         let rc_c = reverse_complement(&cand);
         let mut opts: Vec<Vec<u8>> = Vec::new();
-        if &cur[1..] == &cand[..k - 1] {
+        if cur[1..] == cand[..k - 1] {
             opts.push(cand.clone());
         }
-        if cand != rc_c && &cur[1..] == &rc_c[..k - 1] {
+        if cand != rc_c && cur[1..] == rc_c[..k - 1] {
             opts.push(rc_c);
         }
         if opts.is_empty() {

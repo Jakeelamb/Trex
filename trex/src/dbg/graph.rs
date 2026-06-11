@@ -32,7 +32,12 @@ impl DbgGraph {
         self.adj.get(u).map(|m| m.len()).unwrap_or(0)
     }
 
-    pub(crate) fn add_undirected_edge(&mut self, a: &[u8], b: &[u8], w: u64) -> Result<(), GraphError> {
+    pub(crate) fn add_undirected_edge(
+        &mut self,
+        a: &[u8],
+        b: &[u8],
+        w: u64,
+    ) -> Result<(), GraphError> {
         if a == b {
             return Err(GraphError::SelfLoop);
         }

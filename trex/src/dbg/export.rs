@@ -66,7 +66,10 @@ pub struct UnitigGfaLink {
 }
 
 /// Build sorted, deduplicated **`L`** link rows (`+` / `+` only in v1) from unitig vertex paths.
-pub fn unitig_adjacency_links(graph: &DbgGraph, unitig_paths: &[Vec<Vec<u8>>]) -> Vec<UnitigGfaLink> {
+pub fn unitig_adjacency_links(
+    graph: &DbgGraph,
+    unitig_paths: &[Vec<Vec<u8>>],
+) -> Vec<UnitigGfaLink> {
     let k = graph.k;
     if k < 2 || unitig_paths.len() < 2 {
         return Vec::new();
@@ -123,10 +126,7 @@ pub fn contig_path_matches_unitig_primary_path(
             return Some(vec![(u + 1, '+')]);
         }
         if contig_path.len() == up.len() && !up.is_empty() {
-            let reverse_ok = contig_path
-                .iter()
-                .zip(up.iter().rev())
-                .all(|(a, b)| a == b);
+            let reverse_ok = contig_path.iter().zip(up.iter().rev()).all(|(a, b)| a == b);
             if reverse_ok {
                 return Some(vec![(u + 1, '-')]);
             }
@@ -227,9 +227,8 @@ pub fn primary_contig_paths_for_gfa(
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
-            let segs = contig_path_partition_full_unitigs(p, unitig_paths).or_else(|| {
-                contig_path_matches_unitig_primary_path(p, unitig_paths)
-            })?;
+            let segs = contig_path_partition_full_unitigs(p, unitig_paths)
+                .or_else(|| contig_path_matches_unitig_primary_path(p, unitig_paths))?;
             if segs.is_empty() {
                 None
             } else {
@@ -308,11 +307,7 @@ pub fn write_gfa1(
                 }
                 write!(w, "utg{:06}{}", utg_idx, orient)?;
             }
-            writeln!(
-                w,
-                "\t*\tTS:Z:trex-unphased-hap-mirror\tXX:Z:{}",
-                ctg_name
-            )?;
+            writeln!(w, "\t*\tTS:Z:trex-unphased-hap-mirror\tXX:Z:{}", ctg_name)?;
         }
     }
     w.flush()?;

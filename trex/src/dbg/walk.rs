@@ -24,11 +24,7 @@ pub enum ContigWalkTieBreak {
 }
 
 fn edge_weight(g: &DbgGraph, u: &[u8], v: &[u8]) -> u64 {
-    g.adj
-        .get(u)
-        .and_then(|m| m.get(v))
-        .copied()
-        .unwrap_or(0)
+    g.adj.get(u).and_then(|m| m.get(v)).copied().unwrap_or(0)
 }
 
 fn walk_edge_score(g: &DbgGraph, path: &[Vec<u8>]) -> u64 {
@@ -90,29 +86,19 @@ fn greedy_simple_path(g: &DbgGraph, seed: &[u8], tie_break: ContigWalkTieBreak) 
 
     let mut forward: Vec<Vec<u8>> = vec![seed.to_vec()];
     let mut cur = seed.to_vec();
-    loop {
-        match pick_best_neighbor(g, &cur, &forward_forbidden, tie_break) {
-            Some(nb) => {
-                forward_forbidden.insert(nb.clone());
-                forward.push(nb.clone());
-                cur = nb;
-            }
-            None => break,
-        }
+    while let Some(nb) = pick_best_neighbor(g, &cur, &forward_forbidden, tie_break) {
+        forward_forbidden.insert(nb.clone());
+        forward.push(nb.clone());
+        cur = nb;
     }
 
     let mut all_forbidden = forward_forbidden.clone();
     let mut back_segments: Vec<Vec<u8>> = Vec::new();
     cur = seed.to_vec();
-    loop {
-        match pick_best_neighbor(g, &cur, &all_forbidden, tie_break) {
-            Some(nb) => {
-                all_forbidden.insert(nb.clone());
-                back_segments.push(nb.clone());
-                cur = nb;
-            }
-            None => break,
-        }
+    while let Some(nb) = pick_best_neighbor(g, &cur, &all_forbidden, tie_break) {
+        all_forbidden.insert(nb.clone());
+        back_segments.push(nb.clone());
+        cur = nb;
     }
 
     let mut path: Vec<Vec<u8>> = back_segments.into_iter().rev().collect();

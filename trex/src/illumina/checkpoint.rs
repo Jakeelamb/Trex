@@ -10,10 +10,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::dbg::graph::DbgGraph;
 use crate::error::CheckpointError;
 use crate::illumina::read::Read;
 use crate::kmer::cmp_dna;
-use crate::dbg::graph::DbgGraph;
+
+pub type KmerCounts = Vec<(Vec<u8>, u64)>;
+pub type SequenceRecords = Vec<(String, Vec<u8>)>;
+pub type ExportSequences = (SequenceRecords, SequenceRecords);
 
 #[derive(Debug, Clone)]
 pub struct CheckpointRoot {
@@ -119,7 +123,7 @@ struct GraphCheckpointPayload {
 }
 
 /// Fingerprint for **graph** checkpoint reuse on resume: must match the stored payload or the graph is rebuilt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GraphCheckpointIdentity {
     pub diploid_enabled: bool,
     pub diploid_paired_end: bool,
@@ -127,18 +131,6 @@ pub struct GraphCheckpointIdentity {
     pub diploid_insert_stddev_bp: Option<u64>,
     /// **Phase-2 Illumina** mate-pair bridge boost applied before simplification (edge weights only).
     pub phase2_mate_bridge_v1: bool,
-}
-
-impl Default for GraphCheckpointIdentity {
-    fn default() -> Self {
-        Self {
-            diploid_enabled: false,
-            diploid_paired_end: false,
-            diploid_insert_mean_bp: None,
-            diploid_insert_stddev_bp: None,
-            phase2_mate_bridge_v1: false,
-        }
-    }
 }
 
 fn decode_acgt_key(label: &str, s: &str) -> Result<Vec<u8>, CheckpointError> {
@@ -192,7 +184,7 @@ pub fn write_preprocess_checkpoint(
         serde_json::to_writer(&mut body, &line)?;
         body.push(b'\n');
     }
-    fs::write(&path, &body)?;
+    fs::write(path, &body)?;
     if strict {
         let digest = sha256_hex(&body);
         let manifest = Manifest {
@@ -280,7 +272,7 @@ pub fn write_counts_checkpoint(
     let payload = CountsPayload { k, entries };
     let mut body = serde_json::to_vec(&payload)?;
     body.push(b'\n');
-    fs::write(&path, &body)?;
+    fs::write(path, &body)?;
     if strict {
         let digest = sha256_hex(&body);
         let manifest = Manifest {
@@ -298,7 +290,7 @@ pub fn load_counts_checkpoint(
     ck: &CheckpointRoot,
     strict: bool,
     k: usize,
-) -> Result<Option<Vec<(Vec<u8>, u64)>>, CheckpointError> {
+) -> Result<Option<KmerCounts>, CheckpointError> {
     let path = ck.counts_json();
     if !path.exists() {
         return Ok(None);
@@ -374,7 +366,7 @@ pub fn write_graph_checkpoint(
     let mut body = serde_json::to_vec(&payload)?;
     body.push(b'\n');
     let path = ck.graph_json();
-    fs::write(&path, &body)?;
+    fs::write(path, &body)?;
     if strict {
         let digest = sha256_hex(&body);
         let manifest = Manifest {
@@ -382,10 +374,7 @@ pub fn write_graph_checkpoint(
             stage: "graph".into(),
             sha256: digest,
         };
-        fs::write(
-            ck.graph_manifest(),
-            serde_json::to_vec_pretty(&manifest)?,
-        )?;
+        fs::write(ck.graph_manifest(), serde_json::to_vec_pretty(&manifest)?)?;
     }
     Ok(())
 }
@@ -468,9 +457,8 @@ pub fn write_export_checkpoint(
         } else {
             header.clone()
         };
-        let seqs = String::from_utf8(seq.clone()).map_err(|e| {
-            CheckpointError::InvalidGraph(format!("export unitig {id}: {e}"))
-        })?;
+        let seqs = String::from_utf8(seq.clone())
+            .map_err(|e| CheckpointError::InvalidGraph(format!("export unitig {id}: {e}")))?;
         decode_acgt_key("export.unitig.seq", &seqs)?;
         urec.push(ExportSeqRecord { id, seq: seqs });
     }
@@ -481,9 +469,8 @@ pub fn write_export_checkpoint(
         } else {
             header.clone()
         };
-        let seqs = String::from_utf8(seq.clone()).map_err(|e| {
-            CheckpointError::InvalidGraph(format!("export contig {id}: {e}"))
-        })?;
+        let seqs = String::from_utf8(seq.clone())
+            .map_err(|e| CheckpointError::InvalidGraph(format!("export contig {id}: {e}")))?;
         decode_acgt_key("export.contig.seq", &seqs)?;
         crec.push(ExportSeqRecord { id, seq: seqs });
     }
@@ -495,7 +482,7 @@ pub fn write_export_checkpoint(
     let mut body = serde_json::to_vec(&payload)?;
     body.push(b'\n');
     let path = ck.export_sequences_json();
-    fs::write(&path, &body)?;
+    fs::write(path, &body)?;
     if strict {
         let digest = sha256_hex(&body);
         let manifest = Manifest {
@@ -503,10 +490,7 @@ pub fn write_export_checkpoint(
             stage: "export".into(),
             sha256: digest,
         };
-        fs::write(
-            ck.export_manifest(),
-            serde_json::to_vec_pretty(&manifest)?,
-        )?;
+        fs::write(ck.export_manifest(), serde_json::to_vec_pretty(&manifest)?)?;
     }
     Ok(())
 }
@@ -516,7 +500,7 @@ pub fn load_export_checkpoint(
     ck: &CheckpointRoot,
     strict: bool,
     k: usize,
-) -> Result<Option<(Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>)>, CheckpointError> {
+) -> Result<Option<ExportSequences>, CheckpointError> {
     let path = ck.export_sequences_json();
     if !path.exists() {
         return Ok(None);
@@ -607,14 +591,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let ck = CheckpointRoot::new(dir.path().to_path_buf());
         let k = 5usize;
-        let unitigs = vec![(
-            "utg000001".to_string(),
-            b"ACGTACGTAC".to_vec(),
-        )];
-        let contigs = vec![(
-            "ctg000001".to_string(),
-            b"ACGTACGTAC".to_vec(),
-        )];
+        let unitigs = vec![("utg000001".to_string(), b"ACGTACGTAC".to_vec())];
+        let contigs = vec![("ctg000001".to_string(), b"ACGTACGTAC".to_vec())];
         write_export_checkpoint(&ck, k, &unitigs, &contigs, false).expect("write export");
         let (u2, c2) = load_export_checkpoint(&ck, false, k)
             .expect("load")

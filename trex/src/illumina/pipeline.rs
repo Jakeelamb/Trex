@@ -23,6 +23,10 @@ use crate::illumina::phase2_primary;
 use crate::illumina::read::Read;
 use crate::kmer::apply_trusted_threshold;
 
+type SequenceRecords = Vec<(String, Vec<u8>)>;
+type ContigPaths = Vec<Vec<Vec<u8>>>;
+type StitchedAssembly = (SequenceRecords, SequenceRecords, ContigPaths, ContigPaths);
+
 /// Default output layout (**Phase-1 export layout**): separate files under `out_dir`.
 #[derive(Debug, Clone)]
 pub struct AssembleOutputs {
@@ -111,15 +115,7 @@ fn stitch_unitigs_and_contigs(
     forward: &HashMap<Vec<u8>, Vec<u8>>,
     k: usize,
     tie_break: ContigWalkTieBreak,
-) -> Result<
-    (
-        Vec<(String, Vec<u8>)>,
-        Vec<(String, Vec<u8>)>,
-        Vec<Vec<Vec<u8>>>,
-        Vec<Vec<Vec<u8>>>,
-    ),
-    TrexError,
-> {
+) -> Result<StitchedAssembly, TrexError> {
     let unitig_paths = extract_unitigs(graph);
     let mut unitig_records: Vec<(String, Vec<u8>)> = Vec::new();
     for p in &unitig_paths {
@@ -132,12 +128,7 @@ fn stitch_unitigs_and_contigs(
         let seq = stitch_sequence(p, forward, k)?;
         contig_records.push((String::new(), seq));
     }
-    Ok((
-        unitig_records,
-        contig_records,
-        unitig_paths,
-        contig_paths,
-    ))
+    Ok((unitig_records, contig_records, unitig_paths, contig_paths))
 }
 
 /// **Phase-2 Illumina diploid** options (experimental). When `enabled`, diamond bubble simplification
@@ -264,10 +255,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
 
     let forward = forward_representatives(&reads, params.k)?;
     let simplify_params = merge_simplify_params(params.k, &params.simplify);
-    let diploid_simplify = params
-        .diploid
-        .enabled
-        .then_some(DiploidSimplifyMode);
+    let diploid_simplify = params.diploid.enabled.then_some(DiploidSimplifyMode);
     let graph_ck_id = graph_checkpoint_identity(params);
 
     let graph = if let Some(ref c) = ck {
@@ -300,7 +288,12 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
                     }
                     remove_tips(&mut g, &simplify_params);
                     remove_diamond_bubbles_ext(&mut g, &simplify_params, diploid_simplify);
-                    checkpoint::write_graph_checkpoint(c, &g, params.strict_checkpoints, &graph_ck_id)?;
+                    checkpoint::write_graph_checkpoint(
+                        c,
+                        &g,
+                        params.strict_checkpoints,
+                        &graph_ck_id,
+                    )?;
                     g
                 }
             }
@@ -308,7 +301,8 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
             let mut g = build_dbg(&reads, params.k, &trusted)?;
             if graph_ck_id.phase2_mate_bridge_v1 {
                 if let Some(n) = paired_r1_len {
-                    let nb = mate::boost_mate_pairs_on_existing_dbg_edges(&mut g, &reads, n, params.k);
+                    let nb =
+                        mate::boost_mate_pairs_on_existing_dbg_edges(&mut g, &reads, n, params.k);
                     if nb > 0 {
                         tracing::info!(
                             mate_bridge_boosts = nb,
@@ -366,17 +360,23 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         ContigWalkTieBreak::Phase1Lex
     };
 
-    let (unitig_records, mut contig_records, unitig_paths, contig_paths) = match (&ck, params.resume) {
-        (Some(c), true) => match checkpoint::load_export_checkpoint(c, params.strict_checkpoints, params.k)? {
-            Some((ur, cr)) => {
-                let up = extract_unitigs(&graph);
-                let cp = reference_contig_paths(&graph, &forward, params.k, contig_tie_break)?;
-                (ur, cr, up, cp)
+    let (unitig_records, mut contig_records, unitig_paths, contig_paths) =
+        match (&ck, params.resume) {
+            (Some(c), true) => {
+                match checkpoint::load_export_checkpoint(c, params.strict_checkpoints, params.k)? {
+                    Some((ur, cr)) => {
+                        let up = extract_unitigs(&graph);
+                        let cp =
+                            reference_contig_paths(&graph, &forward, params.k, contig_tie_break)?;
+                        (ur, cr, up, cp)
+                    }
+                    None => {
+                        stitch_unitigs_and_contigs(&graph, &forward, params.k, contig_tie_break)?
+                    }
+                }
             }
-            None => stitch_unitigs_and_contigs(&graph, &forward, params.k, contig_tie_break)?,
-        },
-        _ => stitch_unitigs_and_contigs(&graph, &forward, params.k, contig_tie_break)?,
-    };
+            _ => stitch_unitigs_and_contigs(&graph, &forward, params.k, contig_tie_break)?,
+        };
 
     if params.diploid.enabled {
         let trusted_map: HashMap<Vec<u8>, u64> = trusted.iter().cloned().collect();

@@ -133,7 +133,7 @@ fn repo_root() -> DynResult<PathBuf> {
 
 fn load_matrix(root: &Path) -> DynResult<Matrix> {
     let path = root.join("tools/benchmark_matrix.toml");
-    let text = fs::read_to_string(&path)?;
+    let text = fs::read_to_string(path)?;
     Ok(toml::from_str(&text)?)
 }
 
@@ -219,7 +219,7 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
 
 fn validate_capabilities(root: &Path) -> DynResult<()> {
     let doc_path = root.join("docs/CAPABILITIES.md");
-    let text = fs::read_to_string(&doc_path)?;
+    let text = fs::read_to_string(doc_path)?;
     let flags = extract_assemble_flags(&root.join("trex-cli/src/main.rs"))?;
     let missing_flags: Vec<_> = flags
         .iter()
@@ -384,10 +384,11 @@ fn scripts_for_any_tier(row: &Row) -> Vec<&String> {
         row.main_scripts.as_ref(),
         row.nightly_scripts.as_ref(),
         row.manual_scripts.as_ref(),
-    ] {
-        if let Some(list) = list {
-            scripts.extend(list.iter());
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        scripts.extend(list.iter());
     }
     scripts
 }
@@ -408,10 +409,11 @@ fn artifacts_for_any_tier(row: &Row) -> Vec<&String> {
         row.main_artifacts.as_ref(),
         row.nightly_artifacts.as_ref(),
         row.manual_artifacts.as_ref(),
-    ] {
-        if let Some(list) = list {
-            artifacts.extend(list.iter());
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        artifacts.extend(list.iter());
     }
     artifacts
 }

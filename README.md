@@ -59,4 +59,4 @@ cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json
 
 `phase2_illumina_benchmark_gate.sh` runs **`benchmark_gate.sh`** first, then the synthetic **two-parent** diploid reference layer, graph summaries, haplotype metrics, and optional **QUAST** when `TREX_RUN_QUAST=1` (per **Phase-2 Illumina benchmark gate** in [`CONTEXT.md`](CONTEXT.md)). CI runs the full script on **`main`/`master`**, **tags**, **schedule**, and **workflow_dispatch**; pull requests run [`pr_smoke.sh`](scripts/pr_smoke.sh) without mandatory **minimap2** (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-MSRV is **1.74** (`rust-version` in workspace `Cargo.toml`); CI runs `1.74.0` and `stable`.
+MSRV is **1.74** (`rust-version` in workspace `Cargo.toml`); repo-local development defaults to nightly via [`rust-toolchain.toml`](rust-toolchain.toml), and CI runs `1.74.0`, `stable`, and `nightly`.
