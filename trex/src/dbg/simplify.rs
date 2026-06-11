@@ -73,8 +73,8 @@ pub fn remove_tips(graph: &mut DbgGraph, p: &SimplifyParams) {
             if neigh.is_empty() {
                 continue;
             }
-            let tip_len = tip_chain_bases(graph, &leaf, &neigh, p.max_tip_bases, graph.k);
-            if tip_len <= p.max_tip_bases {
+            if tip_chain_bases_to_junction(graph, &leaf, &neigh, p.max_tip_bases, graph.k).is_some()
+            {
                 graph.remove_undirected_edge(&leaf, &neigh);
                 removed_any = true;
             }
@@ -85,12 +85,26 @@ pub fn remove_tips(graph: &mut DbgGraph, p: &SimplifyParams) {
     }
 }
 
-fn tip_chain_bases(graph: &DbgGraph, leaf: &[u8], nbr: &[u8], cap: usize, k: usize) -> usize {
+fn tip_chain_bases_to_junction(
+    graph: &DbgGraph,
+    leaf: &[u8],
+    nbr: &[u8],
+    cap: usize,
+    k: usize,
+) -> Option<usize> {
     let mut len = k;
     let mut prev = leaf.to_vec();
     let mut cur = nbr.to_vec();
     let mut visited = BTreeSet::from([prev.clone(), cur.clone()]);
-    while len < cap && graph.degree(&cur) == 2 {
+    loop {
+        match graph.degree(&cur) {
+            0 | 1 => return None,
+            2 => {}
+            _ => return Some(len),
+        }
+        if len >= cap {
+            return None;
+        }
         let nexts: Vec<Vec<u8>> = graph
             .adj
             .get(&cur)
@@ -100,18 +114,17 @@ fn tip_chain_bases(graph: &DbgGraph, leaf: &[u8], nbr: &[u8], cap: usize, k: usi
             .cloned()
             .collect();
         if nexts.len() != 1 {
-            break;
+            return None;
         }
         let nxt = nexts.into_iter().next().unwrap();
         if visited.contains(&nxt) {
-            break;
+            return None;
         }
         visited.insert(nxt.clone());
         prev = cur;
         cur = nxt;
         len += 1;
     }
-    len
 }
 
 /// **Phase-1 simplified graph invariants:** forbid self-adjacency.
@@ -257,6 +270,72 @@ pub fn remove_diamond_bubbles(graph: &mut DbgGraph, p: &SimplifyParams) {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    fn graph_with_nodes(k: usize, nodes: &[&[u8]], mul: u64) -> DbgGraph {
+        DbgGraph::new(k, {
+            let mut mm = BTreeMap::new();
+            for v in nodes {
+                mm.insert((*v).to_vec(), mul);
+            }
+            mm
+        })
+    }
+
+    #[test]
+    fn tip_clipping_retains_isolated_linear_component() {
+        let k = 4usize;
+        let a = b"AAAA";
+        let b = b"AAAC";
+        let c = b"AACC";
+        let mut g = graph_with_nodes(k, &[a, b, c], 1);
+        g.add_undirected_edge(a, b, 1).unwrap();
+        g.add_undirected_edge(b, c, 1).unwrap();
+
+        let p = SimplifyParams {
+            max_tip_bases: 12,
+            tip_max_multiplicity: 2,
+            max_bubble_vertices: 16,
+            max_bubble_internal_bases: 1000,
+        };
+        remove_tips(&mut g, &p);
+
+        assert_eq!(g.degree(a), 1);
+        assert_eq!(g.degree(b), 2);
+        assert_eq!(g.degree(c), 1);
+    }
+
+    #[test]
+    fn tip_clipping_removes_short_leaf_attached_to_junction() {
+        let k = 4usize;
+        let tip = b"AAAT";
+        let hub = b"AAAC";
+        let keep_a = b"AACC";
+        let keep_b = b"ACCC";
+        let mut g = DbgGraph::new(k, {
+            let mut mm = BTreeMap::new();
+            mm.insert(tip.to_vec(), 1);
+            mm.insert(hub.to_vec(), 10);
+            mm.insert(keep_a.to_vec(), 10);
+            mm.insert(keep_b.to_vec(), 10);
+            mm
+        });
+        g.add_undirected_edge(tip, hub, 1).unwrap();
+        g.add_undirected_edge(hub, keep_a, 10).unwrap();
+        g.add_undirected_edge(hub, keep_b, 10).unwrap();
+
+        let p = SimplifyParams {
+            max_tip_bases: 12,
+            tip_max_multiplicity: 2,
+            max_bubble_vertices: 16,
+            max_bubble_internal_bases: 1000,
+        };
+        remove_tips(&mut g, &p);
+
+        assert_eq!(g.degree(tip), 0);
+        assert_eq!(g.degree(hub), 2);
+        assert!(g.adj[hub.as_slice()].contains_key(keep_a.as_slice()));
+        assert!(g.adj[hub.as_slice()].contains_key(keep_b.as_slice()));
+    }
 
     #[test]
     fn diamond_removes_lower_branch() {
