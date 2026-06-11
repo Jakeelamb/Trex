@@ -16,6 +16,7 @@ Rust genome assembler focused on the **Phase-2 Illumina endgame**, with Phase-1 
 | [`tools/benchmark_data.toml`](tools/benchmark_data.toml) | External biological benchmark catalog: ENA source files, source md5s, prepared subset SHA-256s, and ploidy provenance |
 | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) | Operator capability matrix: CLI flags, outputs, checkpoints, CI tiers, scripts, and deferred work |
 | [`docs/PROFILING.md`](docs/PROFILING.md) | Measured profiling baselines, hot symbols, and biological-row blockers |
+| [`literature/`](literature/) | Assembly literature archive and review queue for OLC/DBG, long-read, diploid/T2T, metagenome, polishing, and evaluation papers |
 
 ## Build
 
@@ -61,6 +62,8 @@ cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json
 cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json
 cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json
 cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json
+cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_100k_pairs --out target/benchmarks/ecoli-100k.json
+cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_10k_pairs --out target/benchmarks/yeast-btt-10k.json
 ```
 
 `ref_free_smoke.sh` writes under `target/ref-free-smoke/` and checks byte-identical `contigs.fa`, `unitigs.fa`, and `graph.gfa` against [`fixtures/expected/ref_free_smoke/`](fixtures/expected/ref_free_smoke/). See [`fixtures/README.md`](fixtures/README.md).
@@ -69,6 +72,6 @@ cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs
 
 `xtask bench --tier nightly` includes the governed PhiX174 real-reference micro row. It builds `trex-cli` in release mode, runs `trex illumina assemble` on deterministic PhiX reads, and records wall time, max RSS, observed Trex counters, FASTA/GFA artifact sizes, assembly-size metrics, and reference *k*-mer quality metrics in JSON when the row declares a reference.
 
-`xtask fetch-data` prepares ignored `data/benchmarks/` subsets from the biological catalog. Current external rows cover **E. coli MG1655 SRR001666** at 1k and 10k paired-read rungs and **S. cerevisiae BTT / ERR1308583** as the true diploid eukaryotic rung. The source FASTQ files stay external; the catalog records ENA md5s, source read/base counts, public reference FASTA URLs, prepared subset SHA-256s, reference SHA-256s, and ploidy provenance. Set `TREX_RUN_QUAST=1` on `xtask bench` to run QUAST / MetaQUAST for direct Trex rows with a declared reference.
+`xtask fetch-data` prepares ignored `data/benchmarks/` subsets from the biological catalog. Current external rows cover **E. coli MG1655 SRR001666** at 1k, 10k, and 100k paired-read rungs and **S. cerevisiae BTT / ERR1308583** at 1k and 10k paired-read true diploid eukaryotic rungs. The source FASTQ files stay external; the catalog records ENA md5s, source read/base counts, public reference FASTA URLs, prepared subset SHA-256s, reference SHA-256s, and ploidy provenance. Set `TREX_RUN_QUAST=1` on `xtask bench` to run QUAST / MetaQUAST for direct Trex rows with a declared reference.
 
 MSRV is **1.74** (`rust-version` in workspace `Cargo.toml`); repo-local development defaults to nightly via [`rust-toolchain.toml`](rust-toolchain.toml), and CI runs `1.74.0`, `stable`, and `nightly`.

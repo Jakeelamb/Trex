@@ -33,9 +33,12 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 | Biological data fetch | `cargo run -p xtask -- fetch-data` | manual/local | Prepares ignored `data/benchmarks/` FASTQ subsets and public reference FASTAs from `tools/benchmark_data.toml`, then verifies prepared SHA-256s where pinned. |
 | Larger bacterial row | `cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json` | manual/local | Runs release Trex on the bounded E. coli MG1655 SRR001666 paired-end subset. The full source is 7,047,668 paired spots / 507,432,096 bases. |
 | Larger bacterial scale-up row | `cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json` | manual/local | Runs release Trex on 10,000 E. coli MG1655 read pairs with the same pinned RefSeq reference-quality scoring. |
+| Higher-depth bacterial profiling row | `cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_100k_pairs --out target/benchmarks/ecoli-100k.json` | manual/local | Runs release Trex on 100,000 E. coli MG1655 read pairs. This is the current scaling sentinel for DBG walk and memory behavior. |
 | True diploid eukaryotic row | `cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_1k_pairs --out target/benchmarks/yeast-btt.json` | manual/local | Runs release Trex with `--diploid` on the bounded S. cerevisiae BTT / ERR1308583 paired-end subset. The ploidy table marks BTT accession 1308583 as euploid diploid; the full source is 14,550,715 paired spots / 2,870,913,582 bases. |
+| Higher-depth diploid eukaryotic profiling row | `cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_10k_pairs --out target/benchmarks/yeast-btt-10k.json` | manual/local | Runs release Trex with `--diploid` on 10,000 BTT read pairs. This is the next eukaryotic scaling rung before full-run claims. |
 | Profiling evidence | `docs/PROFILING.md` plus `target/profiles/` artifacts | manual/local | Records time/RSS/flamegraph commands, current hot symbols, and biological-row blockers without committing raw profiler output. |
 | Optional QUAST row | `scripts/reference_quast.sh` | opt-in local/manual/nightly | Runs QUAST or MetaQUAST when `TREX_RUN_QUAST=1` and the tool is installed; `TREX_QUAST_REF`, `TREX_QUAST_ASM`, and `TREX_QUAST_OUT` target a specific assembly, while `TREX_QUAST_MIN_CONTIG` and `TREX_QUAST_MIN_ALIGNMENT` tune smoke-scale thresholds. |
+| Literature review archive | `literature/sources.md` | manual/local | Tracks archived PDFs, source-only papers, and review targets for OLC/DBG, long-read, diploid/T2T, metagenome, polishing, and evaluation design work. |
 
 `tools/benchmark_matrix.toml` is the governed row list. Rows must name their minimum CI tier, fixtures, scripts or direct Trex invocation, optional tools, and artifact paths so adding a biological or larger row is a schema change instead of prose. External rows declare `external_data` and are backed by `tools/benchmark_data.toml`; their ignored `data/` fixtures are verified when present but are not required for default CI. Base `artifacts` are reported for every tier that runs the row; `pr_artifacts`, `main_artifacts`, `nightly_artifacts`, and `manual_artifacts` are reported only for that tier.
 
@@ -54,6 +57,8 @@ cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json
 cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json
 cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json
 cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json
+cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_100k_pairs --out target/benchmarks/ecoli-100k.json
+cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_10k_pairs --out target/benchmarks/yeast-btt-10k.json
 cargo run -p xtask -- generate-reads --reference fixtures/phix174/reference.fa --out fixtures/phix174/reads.fq --read-len 150 --step 50 --circular
 ```
 
