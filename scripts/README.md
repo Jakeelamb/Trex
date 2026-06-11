@@ -9,7 +9,7 @@
 | [`phase2_illumina_diploid_reference_layer.sh`](phase2_illumina_diploid_reference_layer.sh) | **Phase-2 Illumina** diploid fixture leg: SHA-256 vs [`tools/manifest.toml`](../tools/manifest.toml), parental/read consistency checks, optional minimap2. |
 | [`phase2_illumina_graph_summaries.sh`](phase2_illumina_graph_summaries.sh) | **Phase-2 Illumina graph summaries**: `trex illumina assemble --diploid` on `fixtures/phase2_synthetic/reads.fq`, stats on `contigs.fa`, GFA record counts + `trex-phase2-illumina` header tag. |
 | [`phase2_illumina_haplotype_metrics.sh`](phase2_illumina_haplotype_metrics.sh) | **Phase-2 Illumina haplotype metrics**: compare `target/phase2-graph-summaries/contigs.fa` to both synthetic parents and print best-parent Hamming-style distances. |
-| [`reference_quast.sh`](reference_quast.sh) | Optional **QUAST / MetaQUAST** hook for the Phase-2 synthetic assembly. Runs only when called and QUAST is installed; use `TREX_QUAST_MIN_CONTIG` and `TREX_QUAST_MIN_ALIGNMENT` for smoke-scale thresholds. |
+| [`reference_quast.sh`](reference_quast.sh) | Optional **QUAST / MetaQUAST** hook. Defaults to the Phase-2 synthetic assembly, and `xtask bench` sets `TREX_QUAST_REF`, `TREX_QUAST_ASM`, and `TREX_QUAST_OUT` for direct Trex rows with references; use `TREX_QUAST_MIN_CONTIG` and `TREX_QUAST_MIN_ALIGNMENT` for smoke-scale thresholds. |
 | [`phase2_illumina_benchmark_gate.sh`](phase2_illumina_benchmark_gate.sh) | Layered **Phase-2 Illumina benchmark gate**: Phase-1 gate → diploid reference layer → graph summaries → haplotype metrics → optional QUAST when `TREX_RUN_QUAST=1`. |
 
 ## CI tiers
@@ -17,8 +17,8 @@
 - **Pull request**: `cargo run -p xtask -- gate --tier pr` on MSRV, stable, and nightly Rust. The gate runs `cargo run -p xtask -- validate`, `cargo clippy --workspace --all-features -- -D warnings`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `pr_smoke.sh`.
 - **Main / master / tags / schedule / workflow_dispatch**: install minimap2, then run `phase2_illumina_benchmark_gate.sh`.
 - **Nightly / manual benchmark artifact**: `cargo run -p xtask -- bench --tier nightly --out target/benchmarks/nightly.json` includes the direct release Trex PhiX174 row under `fixtures/phix174/`.
-- **Biological manual rows**: `cargo run -p xtask -- fetch-data` prepares ignored ENA subsets from `tools/benchmark_data.toml`; then run a single row with `cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json` or `--row yeast_btt_err1308583_diploid_1k_pairs`.
-- **Optional QUAST**: set `TREX_RUN_QUAST=1` before `phase2_illumina_benchmark_gate.sh`; artifacts land under `target/quast-phase2-synthetic/`.
+- **Biological manual rows**: `cargo run -p xtask -- fetch-data` prepares ignored ENA subsets and public reference FASTAs from `tools/benchmark_data.toml`; then run a single row with `cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_1k_pairs --out target/benchmarks/ecoli.json`, `--row ecoli_mg1655_srr001666_10k_pairs`, or `--row yeast_btt_err1308583_diploid_1k_pairs`.
+- **Optional QUAST**: set `TREX_RUN_QUAST=1` before `phase2_illumina_benchmark_gate.sh` or `xtask bench`. Synthetic artifacts land under `target/quast-phase2-synthetic/`; direct Trex row artifacts land next to the row output, for example `target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex-quast/combined_reference/report.tsv`.
 
 Layer-specific exit codes from `phase2_illumina_benchmark_gate.sh`:
 
@@ -30,6 +30,6 @@ Layer-specific exit codes from `phase2_illumina_benchmark_gate.sh`:
 | 40 | Phase-2 haplotype metrics |
 | 50 | Optional QUAST |
 
-`xtask bench` writes JSON reports with script exit codes, wall-clock time, GNU-time max RSS when `/usr/bin/time` is available, declared artifact sizes, and direct Trex row metrics when a matrix row declares `[rows.trex]`.
+`xtask bench` writes JSON reports with script exit codes, wall-clock time, GNU-time max RSS when `/usr/bin/time` is available, declared artifact sizes, direct Trex row metrics, reference *k*-mer quality metrics when a row declares `[rows.trex].reference`, and optional QUAST timing/status when `TREX_RUN_QUAST=1`.
 
 See [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), [`tools/benchmark_matrix.toml`](../tools/benchmark_matrix.toml), and [`docs/CAPABILITIES.md`](../docs/CAPABILITIES.md).

@@ -4,9 +4,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REF="${ROOT}/fixtures/phase2_synthetic/parent1.fa"
-ASM="${ROOT}/target/phase2-graph-summaries/contigs.fa"
-OUT="${ROOT}/target/quast-phase2-synthetic"
+REF="${TREX_QUAST_REF:-${ROOT}/fixtures/phase2_synthetic/parent1.fa}"
+ASM="${TREX_QUAST_ASM:-${ROOT}/target/phase2-graph-summaries/contigs.fa}"
+OUT="${TREX_QUAST_OUT:-${ROOT}/target/quast-phase2-synthetic}"
 
 if [[ ! -f "$REF" || ! -f "$ASM" ]]; then
   echo "reference_quast: skip (missing ref or assembly; run phase2 graph summaries first)"

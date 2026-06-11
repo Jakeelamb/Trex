@@ -36,6 +36,13 @@ url = "https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR001/SRR001666/SRR001666_2.fastq.g
 md5 = "9dd454e0fb0d25f0f001cb1b1cadb544"
 bytes = 292718968
 
+[[datasets.references]]
+role = "mg1655_refseq"
+url = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2/GCF_000005845.2_ASM584v2_genomic.fna.gz"
+path = "data/benchmarks/ecoli_mg1655_srr001666/reference.fa"
+sha256 = "53bb6a51b6e92139ced1e38f74b7938781027c52200922ff03718c2237d23bb4"
+notes = "NCBI RefSeq GCF_000005845.2 ASM584v2 / NC_000913.3 MG1655 genomic FASTA."
+
 [[datasets.prepared]]
 role = "r1_1000"
 source_role = "r1"
@@ -49,6 +56,20 @@ source_role = "r2"
 path = "data/benchmarks/ecoli_mg1655_srr001666/r2.1000.fq"
 records = 1000
 sha256 = "a7f2701ffd34f157389143852c3ab02f4b7b783d0614be621fff13048609b7b9"
+
+[[datasets.prepared]]
+role = "r1_10000"
+source_role = "r1"
+path = "data/benchmarks/ecoli_mg1655_srr001666/r1.10000.fq"
+records = 10000
+sha256 = "7f58edff3f91e8cb121b2e61154f25d78009265718ce23c4eb38a3b27a45482f"
+
+[[datasets.prepared]]
+role = "r2_10000"
+source_role = "r2"
+path = "data/benchmarks/ecoli_mg1655_srr001666/r2.10000.fq"
+records = 10000
+sha256 = "b716f7982151ee23eb14d79b4f8504a2745539bfd103e362e0159d3d125a3bf2"
 
 [[datasets]]
 id = "yeast_btt_err1308583"
@@ -80,6 +101,13 @@ role = "r2"
 url = "https://ftp.sra.ebi.ac.uk/vol1/fastq/ERR130/003/ERR1308583/ERR1308583_2.fastq.gz"
 md5 = "c72368cf30f3120ef3d58b77cd4e5985"
 bytes = 1343506492
+
+[[datasets.references]]
+role = "s288c_refseq_r64"
+url = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/146/045/GCF_000146045.2_R64/GCF_000146045.2_R64_genomic.fna.gz"
+path = "data/benchmarks/yeast_btt_err1308583/reference.fa"
+sha256 = "fe42735d3e6242f8c40b457a232940e34ef15eb4502717e54a34ed118face4c1"
+notes = "NCBI RefSeq GCF_000146045.2 R64 S288C reference FASTA; used as a rough public reference for BTT isolate scoring."
 
 [[datasets.prepared]]
 role = "r1_1000"

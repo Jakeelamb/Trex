@@ -117,6 +117,7 @@ depth_class = "bacterial_real_reads_profile_1k_pairs"
 ci_tier = "manual"
 external_data = "ecoli_mg1655_srr001666"
 fixtures = [
+  "data/benchmarks/ecoli_mg1655_srr001666/reference.fa",
   "data/benchmarks/ecoli_mg1655_srr001666/r1.1000.fq",
   "data/benchmarks/ecoli_mg1655_srr001666/r2.1000.fq",
 ]
@@ -128,11 +129,15 @@ artifacts = [
   "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/unitigs.fa",
   "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/graph.gfa",
 ]
+manual_artifacts = [
+  "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex-quast/report.tsv",
+]
 notes = "First larger bacterial biological read row. The full source is 7,047,668 paired spots / 507,432,096 bases; this governed row uses a bounded 1k-pair profile subset."
 
 [rows.trex]
 tiers = ["manual"]
 out_dir = "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex"
+reference = "data/benchmarks/ecoli_mg1655_srr001666/reference.fa"
 args = [
   "illumina",
   "assemble",
@@ -149,6 +154,52 @@ args = [
 ]
 
 [[rows]]
+id = "ecoli_mg1655_srr001666_10k_pairs"
+technology = "illumina_pe"
+organism = "Escherichia coli str. K-12 substr. MG1655"
+license = "public_ena; public_ncbi_refseq"
+provenance = "ENA SRR001666 first 10000 read pairs plus NCBI RefSeq GCF_000005845.2 / NC_000913.3 MG1655 reference"
+depth_class = "bacterial_real_reads_profile_10k_pairs"
+ci_tier = "manual"
+external_data = "ecoli_mg1655_srr001666"
+fixtures = [
+  "data/benchmarks/ecoli_mg1655_srr001666/reference.fa",
+  "data/benchmarks/ecoli_mg1655_srr001666/r1.10000.fq",
+  "data/benchmarks/ecoli_mg1655_srr001666/r2.10000.fq",
+]
+digest_manifest = "tools/manifest.toml"
+manifest_table = "external.ecoli_mg1655_srr001666_10k_pairs"
+optional_tools = ["minimap2", "quast"]
+artifacts = [
+  "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex/contigs.fa",
+  "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex/unitigs.fa",
+  "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex/graph.gfa",
+]
+manual_artifacts = [
+  "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex-quast/report.tsv",
+]
+notes = "First bacterial scale-up rung. Still bounded enough for local iteration, but 10x the 1k-pair biological row with the same pinned reference-quality scoring."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex"
+reference = "data/benchmarks/ecoli_mg1655_srr001666/reference.fa"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/ecoli_mg1655_srr001666/r1.10000.fq",
+  "--r2",
+  "data/benchmarks/ecoli_mg1655_srr001666/r2.10000.fq",
+  "--kmer-size",
+  "31",
+  "--trusted-threshold",
+  "1",
+  "--out-dir",
+  "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex",
+]
+
+[[rows]]
 id = "yeast_btt_err1308583_diploid_1k_pairs"
 technology = "illumina_pe"
 organism = "Saccharomyces cerevisiae"
@@ -158,6 +209,7 @@ depth_class = "diploid_eukaryotic_real_reads_profile_1k_pairs"
 ci_tier = "manual"
 external_data = "yeast_btt_err1308583"
 fixtures = [
+  "data/benchmarks/yeast_btt_err1308583/reference.fa",
   "data/benchmarks/yeast_btt_err1308583/r1.1000.fq",
   "data/benchmarks/yeast_btt_err1308583/r2.1000.fq",
 ]
@@ -169,11 +221,15 @@ artifacts = [
   "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/unitigs.fa",
   "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/graph.gfa",
 ]
+manual_artifacts = [
+  "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex-quast/report.tsv",
+]
 notes = "First true diploid eukaryotic biological read row. The full source is 14,550,715 paired spots / 2,870,913,582 bases; this governed row uses a bounded 1k-pair profile subset."
 
 [rows.trex]
 tiers = ["manual"]
 out_dir = "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex"
+reference = "data/benchmarks/yeast_btt_err1308583/reference.fa"
 args = [
   "illumina",
   "assemble",

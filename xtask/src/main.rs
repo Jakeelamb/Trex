@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -141,6 +141,8 @@ struct DataSet {
     notes: String,
     files: Vec<DataFile>,
     #[serde(default)]
+    references: Vec<DataReference>,
+    #[serde(default)]
     prepared: Vec<PreparedDataFile>,
 }
 
@@ -159,6 +161,15 @@ struct PreparedDataFile {
     path: String,
     records: usize,
     sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataReference {
+    role: String,
+    url: String,
+    path: String,
+    sha256: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -198,6 +209,7 @@ struct TrexRunReport {
     max_rss_kib: Option<u64>,
     observed: Option<TrexObserved>,
     metrics: Option<AssemblyMetrics>,
+    quast: Option<ScriptReport>,
 }
 
 #[derive(Serialize)]
@@ -219,6 +231,7 @@ struct AssemblyMetrics {
     contigs: Option<FastaStats>,
     unitigs: Option<FastaStats>,
     gfa: Option<GfaStats>,
+    reference_quality: Option<ReferenceQuality>,
 }
 
 #[derive(Serialize)]
@@ -245,6 +258,18 @@ struct GfaStats {
     l_lines: usize,
     p_lines: usize,
     bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ReferenceQuality {
+    kmer_size: usize,
+    contig_kmers: usize,
+    contig_kmers_in_reference: usize,
+    contig_kmer_reference_fraction: f64,
+    contigs_with_reference_hit: usize,
+    contig_records: usize,
+    contig_bases: usize,
+    contig_bases_with_reference_hit: usize,
 }
 
 #[derive(Serialize)]
@@ -600,6 +625,61 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
             return Err(format!("{}: at least one source file is required", dataset.id).into());
         }
 
+        let mut reference_roles = BTreeSet::new();
+        for reference in &dataset.references {
+            if !reference_roles.insert(reference.role.clone()) {
+                return Err(format!(
+                    "{}: duplicate reference role {}",
+                    dataset.id, reference.role
+                )
+                .into());
+            }
+            if !reference.url.starts_with("https://") {
+                return Err(format!(
+                    "{}: reference URL must be https: {}",
+                    dataset.id, reference.url
+                )
+                .into());
+            }
+            require_rel_path(root, &dataset.id, "reference.path", &reference.path, false)?;
+            if !reference.path.starts_with("data/") {
+                return Err(format!(
+                    "{}: reference data must live under data/: {}",
+                    dataset.id, reference.path
+                )
+                .into());
+            }
+            if let Some(expected) = reference.sha256.as_deref() {
+                if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "{}: invalid sha256 for reference {}",
+                        dataset.id, reference.role
+                    )
+                    .into());
+                }
+                let path = root.join(&reference.path);
+                if path.exists() {
+                    let got = sha256_file(&path)?;
+                    if got != expected {
+                        return Err(format!(
+                            "{}: reference {} digest mismatch: got {}, expected {}",
+                            dataset.id, reference.role, got, expected
+                        )
+                        .into());
+                    }
+                }
+            }
+            if let Some(notes) = reference.notes.as_deref() {
+                if notes.trim().is_empty() {
+                    return Err(format!(
+                        "{}: reference {} notes must not be empty when present",
+                        dataset.id, reference.role
+                    )
+                    .into());
+                }
+            }
+        }
+
         for prepared in &dataset.prepared {
             if !roles.contains(&prepared.source_role) {
                 return Err(format!(
@@ -688,7 +768,12 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
         if let Some(trex) = row.trex.as_ref() {
             if should_run_trex {
                 let report = run_trex_bench(root, trex)?;
-                if !report.success {
+                let quast_failed = report
+                    .quast
+                    .as_ref()
+                    .map(|quast| !quast.success)
+                    .unwrap_or(false);
+                if !report.success || quast_failed {
                     failed = true;
                 }
                 trex_reports.push(report);
@@ -949,6 +1034,11 @@ fn run_trex_bench(root: &Path, trex: &TrexBench) -> DynResult<TrexRunReport> {
     } else {
         None
     };
+    let quast = if output.status.success() {
+        run_optional_quast(root, trex)?
+    } else {
+        None
+    };
     Ok(TrexRunReport {
         command,
         exit_code: output.status.code(),
@@ -958,6 +1048,7 @@ fn run_trex_bench(root: &Path, trex: &TrexBench) -> DynResult<TrexRunReport> {
         max_rss_kib,
         observed,
         metrics,
+        quast,
     })
 }
 
@@ -988,6 +1079,17 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let contigs = fasta_stats_optional(&out_dir.join("contigs.fa"))?;
     let unitigs = fasta_stats_optional(&out_dir.join("unitigs.fa"))?;
     let gfa = gfa_stats_optional(&out_dir.join("graph.gfa"))?;
+    let reference_quality = match (trex.reference.as_deref(), kmer_size) {
+        (Some(reference), Some(k)) => {
+            let contigs_path = out_dir.join("contigs.fa");
+            if contigs_path.exists() {
+                Some(reference_quality(&root.join(reference), &contigs_path, k)?)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     Ok(AssemblyMetrics {
         kmer_size,
         candidate_kmers,
@@ -997,7 +1099,73 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         contigs,
         unitigs,
         gfa,
+        reference_quality,
     })
+}
+
+fn run_optional_quast(root: &Path, trex: &TrexBench) -> DynResult<Option<ScriptReport>> {
+    if std::env::var("TREX_RUN_QUAST").ok().as_deref() != Some("1") {
+        return Ok(None);
+    }
+    let Some(reference) = trex.reference.as_deref() else {
+        return Ok(None);
+    };
+    let asm = root.join(&trex.out_dir).join("contigs.fa");
+    if !asm.exists() {
+        return Ok(None);
+    }
+    let quast_out = root.join(&trex.out_dir).with_file_name(format!(
+        "{}-quast",
+        Path::new(&trex.out_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("trex")
+    ));
+    let script = "scripts/reference_quast.sh";
+    println!("xtask bench: running optional QUAST for {}", trex.out_dir);
+    let start = std::time::Instant::now();
+    let output = if Path::new("/usr/bin/time").exists() {
+        Command::new("/usr/bin/time")
+            .current_dir(root)
+            .env("TREX_QUAST_REF", root.join(reference))
+            .env("TREX_QUAST_ASM", asm)
+            .env("TREX_QUAST_OUT", &quast_out)
+            .args(["-f", "TREX_XTASK_TIME\t%e\t%M", "bash", script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?
+    } else {
+        Command::new("bash")
+            .current_dir(root)
+            .env("TREX_QUAST_REF", root.join(reference))
+            .env("TREX_QUAST_ASM", asm)
+            .env("TREX_QUAST_OUT", &quast_out)
+            .arg(script)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?
+    };
+    let wall_ms = start.elapsed().as_millis();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (time_seconds, max_rss_kib, passthrough_stderr) = parse_time_stderr(&stderr);
+    if !passthrough_stderr.trim().is_empty() {
+        eprint!("{passthrough_stderr}");
+        if !passthrough_stderr.ends_with('\n') {
+            eprintln!();
+        }
+    }
+    Ok(Some(ScriptReport {
+        path: script.to_string(),
+        exit_code: output.status.code(),
+        success: output.status.success(),
+        wall_ms,
+        time_seconds,
+        max_rss_kib,
+    }))
 }
 
 fn parse_trex_observed(stdout: &str) -> Option<TrexObserved> {
@@ -1167,6 +1335,105 @@ fn fasta_sequences(path: &Path) -> DynResult<Vec<Vec<u8>>> {
     Ok(seqs)
 }
 
+fn reference_quality(
+    reference_path: &Path,
+    contigs_path: &Path,
+    k: usize,
+) -> DynResult<ReferenceQuality> {
+    let reference = fasta_sequences(reference_path)?;
+    let contigs = fasta_sequences(contigs_path)?;
+    Ok(reference_quality_from_sequences(&reference, &contigs, k))
+}
+
+fn reference_quality_from_sequences(
+    reference: &[Vec<u8>],
+    contigs: &[Vec<u8>],
+    k: usize,
+) -> ReferenceQuality {
+    let reference_kmers = canonical_kmer_set(reference, k);
+    let mut contig_kmers = 0usize;
+    let mut contig_kmers_in_reference = 0usize;
+    let mut contigs_with_reference_hit = 0usize;
+    let mut contig_bases = 0usize;
+    let mut contig_bases_with_reference_hit = 0usize;
+
+    for contig in contigs {
+        contig_bases += contig.len();
+        let mut has_hit = false;
+        for window in acgt_windows(contig, k) {
+            contig_kmers += 1;
+            if reference_kmers.contains(&canonical_kmer(window)) {
+                contig_kmers_in_reference += 1;
+                has_hit = true;
+            }
+        }
+        if has_hit {
+            contigs_with_reference_hit += 1;
+            contig_bases_with_reference_hit += contig.len();
+        }
+    }
+
+    let contig_kmer_reference_fraction = if contig_kmers == 0 {
+        0.0
+    } else {
+        contig_kmers_in_reference as f64 / contig_kmers as f64
+    };
+
+    ReferenceQuality {
+        kmer_size: k,
+        contig_kmers,
+        contig_kmers_in_reference,
+        contig_kmer_reference_fraction,
+        contigs_with_reference_hit,
+        contig_records: contigs.len(),
+        contig_bases,
+        contig_bases_with_reference_hit,
+    }
+}
+
+fn canonical_kmer_set(seqs: &[Vec<u8>], k: usize) -> HashSet<Vec<u8>> {
+    let mut out = HashSet::new();
+    if k == 0 {
+        return out;
+    }
+    for seq in seqs {
+        for window in acgt_windows(seq, k) {
+            out.insert(canonical_kmer(window));
+        }
+    }
+    out
+}
+
+fn acgt_windows(seq: &[u8], k: usize) -> impl Iterator<Item = &[u8]> {
+    seq.windows(k).filter(|window| {
+        window
+            .iter()
+            .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T'))
+    })
+}
+
+fn canonical_kmer(window: &[u8]) -> Vec<u8> {
+    let rc = reverse_complement(window);
+    if window <= rc.as_slice() {
+        window.to_vec()
+    } else {
+        rc
+    }
+}
+
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|b| match b {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'T' => b'A',
+            _ => b'N',
+        })
+        .collect()
+}
+
 fn fetch_data(root: &Path, dataset_filter: Option<&str>) -> DynResult<()> {
     validate_data_catalog(root)?;
     let catalog = load_data_catalog(root)?;
@@ -1191,6 +1458,10 @@ fn fetch_data(root: &Path, dataset_filter: Option<&str>) -> DynResult<()> {
 }
 
 fn fetch_dataset(root: &Path, dataset: &DataSet) -> DynResult<()> {
+    for reference in &dataset.references {
+        fetch_reference(root, dataset, reference)?;
+    }
+
     let files: BTreeMap<&str, &DataFile> = dataset
         .files
         .iter()
@@ -1240,6 +1511,76 @@ fn fetch_dataset(root: &Path, dataset: &DataSet) -> DynResult<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn fetch_reference(root: &Path, dataset: &DataSet, reference: &DataReference) -> DynResult<()> {
+    let out_path = root.join(&reference.path);
+    let expected = reference.sha256.as_deref();
+    if out_path.exists() {
+        let got = sha256_file(&out_path)?;
+        if expected.map(|sha| sha == got).unwrap_or(false) {
+            println!(
+                "xtask fetch-data: {} reference {} already present ({got})",
+                dataset.id, reference.role
+            );
+            return Ok(());
+        }
+    }
+    stream_reference_fasta(reference, &out_path)?;
+    let stats = fasta_stats(&out_path)?;
+    if stats.records == 0 || stats.total_bases == 0 {
+        return Err(format!(
+            "xtask fetch-data: {} reference {} produced empty FASTA",
+            dataset.id, reference.role
+        )
+        .into());
+    }
+    let got = sha256_file(&out_path)?;
+    match expected {
+        Some(expected) if expected == got => {
+            println!(
+                "xtask fetch-data: {} reference {} OK ({got})",
+                dataset.id, reference.role
+            );
+        }
+        Some(expected) => {
+            return Err(format!(
+                "xtask fetch-data: {} reference {} digest mismatch: got {}, expected {}",
+                dataset.id, reference.role, got, expected
+            )
+            .into());
+        }
+        None => {
+            println!(
+                "xtask fetch-data: {} reference {} wrote {} bp sha256={got}",
+                dataset.id, reference.role, stats.total_bases
+            );
+        }
+    }
+    Ok(())
+}
+
+fn stream_reference_fasta(reference: &DataReference, out_path: &Path) -> DynResult<()> {
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = out_path.with_extension("tmp");
+    let script = if reference.url.ends_with(".gz") {
+        format!(
+            "curl -fsSL '{}' | gzip -dc > '{}'",
+            reference.url,
+            tmp.display()
+        )
+    } else {
+        format!("curl -fsSL '{}' > '{}'", reference.url, tmp.display())
+    };
+    let status = Command::new("bash").arg("-c").arg(&script).status()?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("fetch failed for {}", reference.url).into());
+    }
+    fs::rename(tmp, out_path)?;
     Ok(())
 }
 
@@ -1516,4 +1857,34 @@ fn parse_time_stderr(stderr: &str) -> (Option<f64>, Option<u64>, String) {
     }
 
     (time_seconds, max_rss_kib, passthrough)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_quality_counts_forward_and_reverse_kmers() {
+        let reference = vec![b"ACCGTTAA".to_vec()];
+        let contigs = vec![b"AACGGT".to_vec()];
+        let q = reference_quality_from_sequences(&reference, &contigs, 4);
+
+        assert_eq!(q.contig_records, 1);
+        assert_eq!(q.contig_kmers, 3);
+        assert_eq!(q.contig_kmers_in_reference, 3);
+        assert_eq!(q.contigs_with_reference_hit, 1);
+        assert_eq!(q.contig_bases_with_reference_hit, 6);
+        assert_eq!(q.contig_kmer_reference_fraction, 1.0);
+    }
+
+    #[test]
+    fn reference_quality_ignores_non_acgt_windows() {
+        let reference = vec![b"ACGTACGT".to_vec()];
+        let contigs = vec![b"ACGTNNNN".to_vec()];
+        let q = reference_quality_from_sequences(&reference, &contigs, 4);
+
+        assert_eq!(q.contig_kmers, 1);
+        assert_eq!(q.contig_kmers_in_reference, 1);
+        assert_eq!(q.contigs_with_reference_hit, 1);
+    }
 }
