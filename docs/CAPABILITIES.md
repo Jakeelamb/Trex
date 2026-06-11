@@ -1,6 +1,6 @@
 # Trex Capabilities
 
-This page is the operator-facing capability matrix. It is validated by `tools/validate_capabilities_doc.py` so CLI flags and benchmark scripts cannot drift out of sight when code changes.
+This page is the operator-facing capability matrix. It is validated by `cargo run -p xtask -- validate-capabilities` so CLI flags and benchmark scripts cannot drift out of sight when code changes.
 
 ## Product Surface
 
@@ -18,7 +18,8 @@ This page is the operator-facing capability matrix. It is validated by `tools/va
 
 | Layer | Script | CI tier | Pass/fail contract |
 |-------|--------|---------|--------------------|
-| Contract validation | `tools/validate_benchmark_matrix.py`, `tools/validate_capabilities_doc.py` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, references missing fixtures/scripts, or this page omits current CLI flags/scripts. |
+| Contract validation | `cargo run -p xtask -- validate` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, references missing fixtures/scripts, or this page omits current CLI flags/scripts. |
+| Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts for a tier and writes JSON with wall time, exit codes, GNU-time max RSS when available, and artifact sizes. |
 | PR smoke | `scripts/pr_smoke.sh` | PR and above | Runs `scripts/ref_free_smoke.sh`, Phase-2 fixture checks, graph summaries, haplotype metrics, and `cargo test --workspace --all-features -q`. |
 | Phase-1 reference-free golden | `scripts/ref_free_smoke.sh` | PR and above | Assembles `fixtures/tiny.fq` and byte-compares `contigs.fa`, `unitigs.fa`, and `graph.gfa` against `fixtures/expected/ref_free_smoke/`. |
 | Phase-1 full benchmark gate | `scripts/benchmark_gate.sh`, `scripts/reference_smoke.sh` | main, tags, schedule, manual | Runs the reference-free golden, then checks contigs against `fixtures/tiny_ref.fa` with minimap2 when installed or substring fallback. |
@@ -28,7 +29,20 @@ This page is the operator-facing capability matrix. It is validated by `tools/va
 | Layered Phase-2 gate | `scripts/phase2_illumina_benchmark_gate.sh` | main, tags, schedule, manual | Runs Phase-1 gate, diploid reference layer, graph summaries, haplotype metrics, and optional QUAST with layer-specific exit codes. |
 | Optional QUAST row | `scripts/reference_quast.sh` | opt-in local/manual/nightly | Runs QUAST or MetaQUAST when `TREX_RUN_QUAST=1` and the tool is installed; `TREX_QUAST_MIN_CONTIG` and `TREX_QUAST_MIN_ALIGNMENT` tune smoke-scale thresholds. |
 
-`tools/benchmark_matrix.toml` is the governed row list. Rows must name their minimum CI tier, fixtures, scripts, optional tools, and artifact paths so adding a biological or larger row is a schema change instead of prose.
+`tools/benchmark_matrix.toml` is the governed row list. Rows must name their minimum CI tier, fixtures, scripts, optional tools, and artifact paths so adding a biological or larger row is a schema change instead of prose. Base `artifacts` are reported for every tier that runs the row; `pr_artifacts`, `main_artifacts`, `nightly_artifacts`, and `manual_artifacts` are reported only for that tier.
+
+## Rust Automation
+
+`xtask` owns repo automation that needs to stay portable and reviewable:
+
+```bash
+cargo run -p xtask -- validate
+cargo run -p xtask -- validate-matrix
+cargo run -p xtask -- validate-capabilities
+cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json
+```
+
+The benchmark artifact is intentionally separate from biological quality claims. It proves the governed row ran and records timing/resource metadata; the row scripts decide whether assembly output passed its correctness contract.
 
 ## Layer Exit Codes
 

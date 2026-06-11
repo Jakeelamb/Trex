@@ -8,6 +8,7 @@ Rust genome assembler focused on the **Phase-2 Illumina endgame**, with Phase-1 
 |------|------|
 | [`trex/`](trex/) | Sync **`trex`** library: FASTQ/FASTA ingest (+ gzip), preprocess, canonical *k*-mer counts (parallel sort by default), DBG build + tip/diamond bubble simplification, unitigs/contigs, GFA 1.0 + FASTA export, checkpoints |
 | [`trex-cli/`](trex-cli/) | Async **`trex-cli`** (`trex` binary): Tokio + `spawn_blocking` into the library |
+| [`xtask/`](xtask/) | Rust repository automation: matrix/capability validators and benchmark artifact runner |
 | [`fixtures/`](fixtures/) | Phase-1 smoke (`tiny.fq`, `tiny_ref.fa`, `expected/ref_free_smoke/`) + **Phase-2 Illumina** synthetic two-parent [`phase2_synthetic/`](fixtures/phase2_synthetic/) |
 | [`scripts/`](scripts/) | Benchmark and smoke scripts; see [`scripts/README.md`](scripts/README.md) (`benchmark_gate.sh`, `phase2_illumina_benchmark_gate.sh`, …) |
 | [`fuzz/`](fuzz/) | `cargo-fuzz` harness (`parse_fastq`); see [`fuzz/README.md`](fuzz/README.md) |
@@ -50,8 +51,8 @@ bash scripts/ref_free_smoke.sh
 bash scripts/pr_smoke.sh
 bash scripts/benchmark_gate.sh
 bash scripts/phase2_illumina_benchmark_gate.sh
-python3 tools/validate_benchmark_matrix.py
-python3 tools/validate_capabilities_doc.py
+cargo run -p xtask -- validate
+cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json
 ```
 
 `ref_free_smoke.sh` writes under `target/ref-free-smoke/` and checks byte-identical `contigs.fa`, `unitigs.fa`, and `graph.gfa` against [`fixtures/expected/ref_free_smoke/`](fixtures/expected/ref_free_smoke/). See [`fixtures/README.md`](fixtures/README.md).

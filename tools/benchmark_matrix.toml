@@ -34,7 +34,9 @@ optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/phase2-graph-summaries/contigs.fa",
   "target/phase2-graph-summaries/graph.gfa",
-  "target/quast-phase2-synthetic/report.tsv",
+]
+nightly_artifacts = [
+  "target/quast-phase2-synthetic/combined_reference/report.tsv",
 ]
 notes = "Default developer + PR path: substring + optional minimap2 + trex diploid assemble smoke."
 

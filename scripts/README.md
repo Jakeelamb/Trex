@@ -14,7 +14,7 @@
 
 ## CI tiers
 
-- **Pull request**: contract validators plus `pr_smoke.sh` on MSRV and stable Rust.
+- **Pull request**: `cargo run -p xtask -- validate`, `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json`, and `pr_smoke.sh` on MSRV and stable Rust.
 - **Main / master / tags / schedule / workflow_dispatch**: install minimap2, then run `phase2_illumina_benchmark_gate.sh`.
 - **Optional QUAST**: set `TREX_RUN_QUAST=1` before `phase2_illumina_benchmark_gate.sh`; artifacts land under `target/quast-phase2-synthetic/`.
 
@@ -27,5 +27,7 @@ Layer-specific exit codes from `phase2_illumina_benchmark_gate.sh`:
 | 30 | Phase-2 graph summaries |
 | 40 | Phase-2 haplotype metrics |
 | 50 | Optional QUAST |
+
+`xtask bench` writes JSON reports with script exit codes, wall-clock time, GNU-time max RSS when `/usr/bin/time` is available, and declared artifact sizes.
 
 See [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), [`tools/benchmark_matrix.toml`](../tools/benchmark_matrix.toml), and [`docs/CAPABILITIES.md`](../docs/CAPABILITIES.md).
