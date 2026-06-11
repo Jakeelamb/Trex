@@ -207,3 +207,34 @@ fn phase2_synthetic_primary_contigs_match_a_parent() {
         );
     }
 }
+
+#[test]
+fn real_repeated_read_does_not_abort_contig_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let seq = b"TGGTACTGGAGCAGAAGAGCTTTCGGTAGTAGAGCTTGATGGAGTTGGTACTGGAGCAGAAGAGCTTTCAGTGGTAGAGCTTGATGGAGTTGGTACTGG";
+    let qual = vec![b'I'; seq.len()];
+    let fq_body = format!(
+        "@ERR1308583.210\n{}\n+\n{}\n",
+        std::str::from_utf8(seq).unwrap(),
+        std::str::from_utf8(&qual).unwrap()
+    );
+    let fq = write_tmp(dir.path(), "yeast_repeat.fq", fq_body.as_bytes());
+    let params = AssembleParams {
+        r1_path: fq,
+        r2_path: None,
+        k: 21,
+        trusted_threshold: 1,
+        checkpoint_root: None,
+        resume: false,
+        strict_checkpoints: false,
+        simplify: SimplifyOverrides::default(),
+        diploid: DiploidParams::default(),
+        outputs: outputs_in(dir.path()),
+    };
+    let out = assemble_illumina(&params).unwrap();
+    assert!(out.unitig_count > 0);
+    assert!(
+        out.outputs.contigs_path().exists(),
+        "assembly should write contig FASTA even when some seed walks are unorientable"
+    );
+}

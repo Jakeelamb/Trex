@@ -116,11 +116,18 @@ fn stitch_unitigs_and_contigs(
     k: usize,
     tie_break: ContigWalkTieBreak,
 ) -> Result<StitchedAssembly, TrexError> {
-    let unitig_paths = extract_unitigs(graph);
+    let raw_unitig_paths = extract_unitigs(graph);
+    let mut unitig_paths: Vec<Vec<Vec<u8>>> = Vec::new();
     let mut unitig_records: Vec<(String, Vec<u8>)> = Vec::new();
-    for p in &unitig_paths {
-        let seq = stitch_sequence(p, forward, k)?;
-        unitig_records.push((String::new(), seq));
+    for p in raw_unitig_paths {
+        match stitch_sequence(&p, forward, k) {
+            Ok(seq) => {
+                unitig_paths.push(p);
+                unitig_records.push((String::new(), seq));
+            }
+            Err(GraphError::OrientationConflict) => {}
+            Err(e) => return Err(TrexError::Graph(e)),
+        }
     }
     let contig_paths = reference_contig_paths(graph, forward, k, tie_break)?;
     let mut contig_records: Vec<(String, Vec<u8>)> = Vec::new();

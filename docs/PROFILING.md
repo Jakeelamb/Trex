@@ -31,6 +31,8 @@ Observed baseline:
 | Input | Reads | Candidate k-mers | Unique k-mers | Unitigs | Contigs | Wall | Max RSS |
 |-------|-------|------------------|---------------|---------|---------|------|---------|
 | PhiX174 deterministic 150 bp reads | 108 | 12,960 | 5,386 | 1 | 1 | 27.25 s | 12,668 KiB |
+| PhiX174 after unorientable-walk filtering | 108 | 12,960 | 5,386 | 1 | 1 | 26.65 s | 12,596 KiB |
+| PhiX174 after `pick_best_neighbor` lookup/set optimization | 108 | 12,960 | 5,386 | 1 | 1 | 18.34 s | 12,532 KiB |
 
 Top `perf report` symbols from `target/profiles/phix174.perf.data`:
 
@@ -64,13 +66,18 @@ Rows:
 
 | Row | Source | Prepared subset | Current result |
 |-----|--------|-----------------|----------------|
-| `ecoli_mg1655_srr001666_1k_pairs` | ENA `SRR001666`; 7,047,668 paired spots / 507,432,096 bases | 1,000 R1 + 1,000 R2 reads | Runs, but emits 0 unitigs / 0 contigs with `k=31`, `T=1`; `k=21`, `T=1` also emits 0 contigs. |
-| `yeast_btt_err1308583_diploid_1k_pairs` | ENA `ERR1308583`; 14,550,715 paired spots / 2,870,913,582 bases; BTT ploidy table = euploid diploid | 1,000 R1 + 1,000 R2 reads | Fails in core assembly with `incompatible forward k-mer assignments for canonical node`, even R1-only without `--diploid`. |
+| `ecoli_mg1655_srr001666_1k_pairs` | ENA `SRR001666`; 7,047,668 paired spots / 507,432,096 bases | 1,000 R1 + 1,000 R2 reads | Runs, but emits 0 unitigs / 0 contigs with `k=31`, `T=1`; `k=21`, `T=1` also emits 0 contigs. Current measured row: 0.06 s, 16,816 KiB RSS. |
+| `yeast_btt_err1308583_diploid_1k_pairs` | ENA `ERR1308583`; 14,550,715 paired spots / 2,870,913,582 bases; BTT ploidy table = euploid diploid | 1,000 R1 + 1,000 R2 reads | Passes after unorientable-walk filtering: 2,000 reads, 149,866 unique/trusted k-mers, 31 unitigs, 19 contigs, 5.80 s, 145,452 KiB RSS. |
 
 Immediate read:
 
 - Biological data ingestion and fixture governance are now present.
-- The next correctness blocker is real-read DBG orientation/simplification behavior, especially the
-  canonical-node forward assignment conflict exposed by yeast.
+- The yeast row exposed that candidate walks through a canonical undirected graph may not have one
+  valid forward orientation. Trex now filters those candidate paths instead of aborting the whole run.
+- The remaining biological correctness blocker is E. coli sparse-read output: the row runs but emits
+  no unitigs or contigs.
 - The next performance blocker on the passing path is `dbg::walk`; profile-guided work should start
   there while keeping biological rows as manual regressions.
+- First walk optimization removed redundant edge lookups in `pick_best_neighbor` and replaced ordered
+  forbidden sets with hash membership. PhiX wall time dropped from 26.65 s to 18.34 s with unchanged
+  assembly metrics.

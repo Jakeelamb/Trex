@@ -6,7 +6,7 @@
 //! keeping the best scoring path found.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::dbg::graph::DbgGraph;
 use crate::dbg::unitig::stitch_sequence;
@@ -45,15 +45,14 @@ fn neighbor_vertex_mul(g: &DbgGraph, nb: &[u8]) -> u64 {
 fn pick_best_neighbor(
     g: &DbgGraph,
     cur: &[u8],
-    forbidden: &BTreeSet<Vec<u8>>,
+    forbidden: &HashSet<Vec<u8>>,
     tie_break: ContigWalkTieBreak,
 ) -> Option<Vec<u8>> {
     let mut best: Option<(u64, Vec<u8>)> = None;
-    for nb in g.adj.get(cur).into_iter().flat_map(|m| m.keys()) {
+    for (nb, &w) in g.adj.get(cur).into_iter().flat_map(|m| m.iter()) {
         if forbidden.contains(nb) {
             continue;
         }
-        let w = edge_weight(g, cur, nb);
         match &best {
             None => best = Some((w, nb.clone())),
             Some((bw, bnb)) => {
@@ -81,7 +80,7 @@ fn pick_best_neighbor(
 /// Greedy **vertex-simple** path: extend forward from `seed`, then backward from `seed` without
 /// reusing vertices from the forward segment (except `seed`).
 fn greedy_simple_path(g: &DbgGraph, seed: &[u8], tie_break: ContigWalkTieBreak) -> Vec<Vec<u8>> {
-    let mut forward_forbidden: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut forward_forbidden: HashSet<Vec<u8>> = HashSet::new();
     forward_forbidden.insert(seed.to_vec());
 
     let mut forward: Vec<Vec<u8>> = vec![seed.to_vec()];
@@ -146,7 +145,11 @@ pub fn reference_contig_paths(
         for seed in &comp {
             let path = greedy_simple_path(g, seed, tie_break);
             let score = walk_edge_score(g, &path);
-            let seq = stitch_sequence(&path, forward, k)?;
+            let seq = match stitch_sequence(&path, forward, k) {
+                Ok(seq) => seq,
+                Err(GraphError::OrientationConflict) => continue,
+                Err(e) => return Err(e),
+            };
             let replace = match &best {
                 None => true,
                 Some((bs, bseq, _)) => {
