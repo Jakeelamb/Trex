@@ -1,7 +1,8 @@
 //! **Phase-1 graph simplification**: tip clipping plus **bounded diamond bubbles** (two
 //! internally vertex-disjoint length-2 paths between opposite corners), resolved using **read-derived
 //! edge multiplicities** with deterministic lex tie-breaks on branch vertices (**Phase-1 bubble
-//! resolution** / **Phase-1 bubble bounds**).
+//! resolution** / **Phase-1 bubble bounds**), followed by SPAdes-inspired low-copy component
+//! pruning for short disconnected noise components.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -14,6 +15,7 @@ use crate::kmer::cmp_dna;
 pub enum SimplifyDecisionAction {
     RemoveTipEdge,
     RemoveDiamondBranch,
+    RemoveLowCoverageComponent,
     RetainDiploidDiamond,
     RetainRepeatGuardedDiamond,
     SkipAmbiguousK22Diamond,
@@ -36,15 +38,17 @@ pub struct SimplifyDecisionLog {
     pub scheduler: SimplificationScheduleReport,
     pub tips: Vec<SimplifyDecision>,
     pub diamonds: Vec<SimplifyDecision>,
+    pub components: Vec<SimplifyDecision>,
 }
 
 impl Default for SimplifyDecisionLog {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             scheduler: SimplificationScheduleReport::default(),
             tips: Vec::new(),
             diamonds: Vec::new(),
+            components: Vec::new(),
         }
     }
 }
@@ -54,6 +58,7 @@ impl Default for SimplifyDecisionLog {
 pub struct SimplifyStats {
     pub tips_removed: usize,
     pub diamond_bubbles_resolved: usize,
+    pub low_coverage_components_removed: usize,
     pub diploid_diamonds_retained: usize,
     pub repeat_guarded_diamonds_retained: usize,
     pub ambiguous_k22_diamonds_skipped: usize,
@@ -64,6 +69,7 @@ pub struct SimplifyStats {
 pub enum SimplificationPassKind {
     TipClipping,
     DiamondBubbles,
+    LowCoverageComponents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +162,10 @@ pub struct SimplifyParams {
     pub max_bubble_vertices: usize,
     /// Conservative **sequence-span budget** (bases) for automatic bubble resolution.
     pub max_bubble_internal_bases: usize,
+    /// Maximum approximate sequence span for low-copy disconnected component pruning.
+    pub max_low_coverage_component_bases: usize,
+    /// Remove a short disconnected component only when every node has trusted multiplicity **≤** this floor.
+    pub low_coverage_component_max_multiplicity: u64,
 }
 
 impl Default for SimplifyParams {
@@ -165,6 +175,8 @@ impl Default for SimplifyParams {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 96,
+            max_low_coverage_component_bases: 96,
+            low_coverage_component_max_multiplicity: 2,
         }
     }
 }
@@ -176,6 +188,8 @@ impl SimplifyParams {
             tip_max_multiplicity: 2,
             max_bubble_vertices: (2 * k).clamp(8, 64),
             max_bubble_internal_bases: (8 * k).max(32),
+            max_low_coverage_component_bases: (3 * k).max(32),
+            low_coverage_component_max_multiplicity: 2,
         }
     }
 }
@@ -242,10 +256,38 @@ pub fn run_simplification_schedule(
         },
     });
 
+    let components_before = GraphTopologySnapshot::from_graph(graph);
+    let (components_removed, component_decisions) =
+        remove_low_coverage_components_with_decisions(graph, p);
+    let components_after = GraphTopologySnapshot::from_graph(graph);
+    let components_changed = components_before != components_after;
+    passes.push(SimplificationPassReport {
+        pass_index: 2,
+        pass: SimplificationPassKind::LowCoverageComponents,
+        before: components_before,
+        after: components_after,
+        planned_decisions: component_decisions.len(),
+        emitted_decisions: component_decisions.len(),
+        graph_edits: components_removed,
+        topology_changed: components_changed,
+        replan_next_pass: false,
+        recompress_hook: if components_changed {
+            SimplificationHookStatus::TopologySnapshotOnly
+        } else {
+            SimplificationHookStatus::NotNeeded
+        },
+        reannotation_hook: if components_changed {
+            SimplificationHookStatus::DownstreamAfterSchedule
+        } else {
+            SimplificationHookStatus::NotNeeded
+        },
+    });
+
     let final_topology = GraphTopologySnapshot::from_graph(graph);
     let stats = SimplifyStats {
         tips_removed,
         diamond_bubbles_resolved: diamond_stats.diamond_bubbles_resolved,
+        low_coverage_components_removed: components_removed,
         diploid_diamonds_retained: diamond_stats.diploid_diamonds_retained,
         repeat_guarded_diamonds_retained: diamond_stats.repeat_guarded_diamonds_retained,
         ambiguous_k22_diamonds_skipped: diamond_stats.ambiguous_k22_diamonds_skipped,
@@ -253,7 +295,7 @@ pub fn run_simplification_schedule(
     (
         stats,
         SimplifyDecisionLog {
-            schema_version: 2,
+            schema_version: 3,
             scheduler: SimplificationScheduleReport {
                 mode: "spades_iterative_v1".to_string(),
                 initial_topology,
@@ -262,6 +304,7 @@ pub fn run_simplification_schedule(
             },
             tips: tip_decisions,
             diamonds: diamond_decisions,
+            components: component_decisions,
         },
     )
 }
@@ -450,6 +493,126 @@ fn repeat_guarded_branch(graph: &DbgGraph, baseline: u64, nodes: [&[u8]; 2]) -> 
             })
             .unwrap_or(false)
     })
+}
+
+pub fn remove_low_coverage_components(graph: &mut DbgGraph, p: &SimplifyParams) -> usize {
+    remove_low_coverage_components_with_decisions(graph, p).0
+}
+
+pub fn remove_low_coverage_components_with_decisions(
+    graph: &mut DbgGraph,
+    p: &SimplifyParams,
+) -> (usize, Vec<SimplifyDecision>) {
+    let decisions = plan_low_coverage_component_removals(graph, p);
+    let mut removed = 0usize;
+    for decision in &decisions {
+        let nodes: Vec<Vec<u8>> = decision
+            .nodes
+            .iter()
+            .map(|node| node.as_bytes().to_vec())
+            .collect();
+        if nodes.is_empty() || !component_still_removable(graph, &nodes, p) {
+            continue;
+        }
+        for node in &nodes {
+            graph.remove_vertex_from_adj(node);
+            graph.node_mul.remove(node);
+        }
+        removed += 1;
+    }
+    (removed, decisions)
+}
+
+pub fn plan_low_coverage_component_removals(
+    graph: &DbgGraph,
+    p: &SimplifyParams,
+) -> Vec<SimplifyDecision> {
+    if p.max_low_coverage_component_bases == 0 {
+        return Vec::new();
+    }
+
+    let components = connected_components_from_adj(graph);
+    let has_stronger_component = components.iter().any(|component| {
+        component_max_multiplicity(graph, component) > p.low_coverage_component_max_multiplicity
+    });
+    if !has_stronger_component {
+        return Vec::new();
+    }
+
+    let mut decisions = Vec::new();
+    for component in components {
+        if !component_still_removable(graph, &component, p) {
+            continue;
+        }
+        let bases = approximate_component_bases(graph.k, component.len());
+        let max_multiplicity = component_max_multiplicity(graph, &component);
+        decisions.push(SimplifyDecision {
+            action: SimplifyDecisionAction::RemoveLowCoverageComponent,
+            reason: format!(
+                "short disconnected component span {bases} <= {} and max multiplicity {max_multiplicity} <= {}",
+                p.max_low_coverage_component_bases,
+                p.low_coverage_component_max_multiplicity
+            ),
+            nodes: component.iter().map(|node| node_label(node)).collect(),
+            removed_node: None,
+            removed_edge: None,
+            score_a: Some(max_multiplicity),
+            score_b: Some(bases as u64),
+        });
+    }
+    decisions
+}
+
+fn connected_components_from_adj(graph: &DbgGraph) -> Vec<Vec<Vec<u8>>> {
+    let mut unseen: BTreeSet<Vec<u8>> = graph.adj.keys().cloned().collect();
+    let mut components = Vec::new();
+    while let Some(seed) = unseen.iter().next().cloned() {
+        unseen.remove(&seed);
+        let mut stack = vec![seed];
+        let mut component = Vec::new();
+        while let Some(node) = stack.pop() {
+            component.push(node.clone());
+            if let Some(neighbors) = graph.adj.get(&node) {
+                for neighbor in neighbors.keys() {
+                    if unseen.remove(neighbor) {
+                        stack.push(neighbor.clone());
+                    }
+                }
+            }
+        }
+        component.sort_by(|a, b| cmp_dna(a, b));
+        components.push(component);
+    }
+    components.sort_by(|a, b| cmp_dna(&a[0], &b[0]));
+    components
+}
+
+fn component_max_multiplicity(graph: &DbgGraph, component: &[Vec<u8>]) -> u64 {
+    component
+        .iter()
+        .filter_map(|node| graph.node_mul.get(node))
+        .copied()
+        .max()
+        .unwrap_or(0)
+}
+
+fn component_still_removable(graph: &DbgGraph, component: &[Vec<u8>], p: &SimplifyParams) -> bool {
+    if component.is_empty() {
+        return false;
+    }
+    let bases = approximate_component_bases(graph.k, component.len());
+    if bases > p.max_low_coverage_component_bases {
+        return false;
+    }
+    component_max_multiplicity(graph, component) <= p.low_coverage_component_max_multiplicity
+}
+
+fn approximate_component_bases(k: usize, node_count: usize) -> usize {
+    if node_count == 0 {
+        0
+    } else {
+        k.saturating_add(node_count.saturating_sub(1))
+    }
 }
 
 /// Resolve **diamond** bubbles `u–a–m` vs `u–b–m` when both `a` and `b` are degree-2 junctions and
@@ -672,6 +835,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 12,
+            low_coverage_component_max_multiplicity: 2,
         };
         let removed = remove_tips(&mut g, &p);
 
@@ -705,6 +870,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 12,
+            low_coverage_component_max_multiplicity: 2,
         };
         let removed = remove_tips(&mut g, &p);
 
@@ -739,6 +906,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 12,
+            low_coverage_component_max_multiplicity: 2,
         };
         let planned = plan_tip_clips(&g, &p);
         let (removed, decisions) = remove_tips_with_decisions(&mut g, &p);
@@ -775,13 +944,15 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 0,
+            low_coverage_component_max_multiplicity: 2,
         };
         let (stats, report) = run_simplification_schedule(&mut g, &p, None);
 
         assert_eq!(stats.tips_removed, 1);
-        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.schema_version, 3);
         assert_eq!(report.scheduler.mode, "spades_iterative_v1");
-        assert_eq!(report.scheduler.passes.len(), 2);
+        assert_eq!(report.scheduler.passes.len(), 3);
         assert_eq!(
             report.scheduler.passes[0].pass,
             SimplificationPassKind::TipClipping
@@ -789,6 +960,10 @@ mod tests {
         assert_eq!(
             report.scheduler.passes[1].pass,
             SimplificationPassKind::DiamondBubbles
+        );
+        assert_eq!(
+            report.scheduler.passes[2].pass,
+            SimplificationPassKind::LowCoverageComponents
         );
         assert_eq!(report.scheduler.passes[0].planned_decisions, 1);
         assert_eq!(report.scheduler.passes[0].graph_edits, 1);
@@ -803,6 +978,7 @@ mod tests {
         );
         assert_eq!(report.tips.len(), 1);
         assert!(report.diamonds.is_empty());
+        assert!(report.components.is_empty());
         assert_eq!(
             report.scheduler.final_topology,
             GraphTopologySnapshot::from_graph(&g)
@@ -838,6 +1014,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 8,
+            low_coverage_component_max_multiplicity: 2,
         };
         let stats = remove_diamond_bubbles(&mut g, &p);
 
@@ -874,6 +1052,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 8,
+            low_coverage_component_max_multiplicity: 2,
         };
         let (stats, decisions) = remove_diamond_bubbles_ext_with_decisions(&mut g, &p, None);
 
@@ -917,6 +1097,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 8,
+            low_coverage_component_max_multiplicity: 2,
         };
         let stats = remove_diamond_bubbles_ext(&mut g, &p, Some(DiploidSimplifyMode));
 
@@ -954,6 +1136,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 8,
+            low_coverage_component_max_multiplicity: 2,
         };
         let (stats, decisions) =
             remove_diamond_bubbles_ext_with_decisions(&mut g, &p, Some(DiploidSimplifyMode));
@@ -999,6 +1183,8 @@ mod tests {
             tip_max_multiplicity: 2,
             max_bubble_vertices: 16,
             max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 8,
+            low_coverage_component_max_multiplicity: 2,
         };
         let (stats, decisions) = remove_diamond_bubbles_ext_with_decisions(&mut g, &p, None);
 
@@ -1010,5 +1196,76 @@ mod tests {
         );
         assert!(g.adj.contains_key(&b));
         assert!(g.adj.contains_key(&a));
+    }
+
+    #[test]
+    fn low_coverage_component_pruning_removes_short_noise_component() {
+        let k = 4usize;
+        let n1 = b"AAAA";
+        let n2 = b"AAAC";
+        let n3 = b"AACC";
+        let keep1 = b"CCCC";
+        let keep2 = b"CCCA";
+        let keep3 = b"CCAA";
+        let mut g = DbgGraph::new(k, {
+            let mut mm = BTreeMap::new();
+            for node in [n1, n2, n3] {
+                mm.insert(node.to_vec(), 2);
+            }
+            for node in [keep1, keep2, keep3] {
+                mm.insert(node.to_vec(), 8);
+            }
+            mm
+        });
+        g.add_undirected_edge(n1, n2, 1).unwrap();
+        g.add_undirected_edge(n2, n3, 1).unwrap();
+        g.add_undirected_edge(keep1, keep2, 8).unwrap();
+        g.add_undirected_edge(keep2, keep3, 8).unwrap();
+
+        let p = SimplifyParams {
+            max_tip_bases: 8,
+            tip_max_multiplicity: 2,
+            max_bubble_vertices: 16,
+            max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 6,
+            low_coverage_component_max_multiplicity: 2,
+        };
+        let (removed, decisions) = remove_low_coverage_components_with_decisions(&mut g, &p);
+
+        assert_eq!(removed, 1);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].action,
+            SimplifyDecisionAction::RemoveLowCoverageComponent
+        );
+        assert_eq!(decisions[0].score_a, Some(2));
+        assert_eq!(decisions[0].score_b, Some(6));
+        assert!(!g.adj.contains_key(n1.as_slice()));
+        assert!(!g.node_mul.contains_key(n2.as_slice()));
+        assert!(g.adj.contains_key(keep2.as_slice()));
+    }
+
+    #[test]
+    fn low_coverage_component_pruning_retains_short_high_copy_component() {
+        let k = 4usize;
+        let a = b"AAAA";
+        let b = b"AAAC";
+        let mut g = graph_with_nodes(k, &[a, b], 3);
+        g.add_undirected_edge(a, b, 3).unwrap();
+
+        let p = SimplifyParams {
+            max_tip_bases: 8,
+            tip_max_multiplicity: 2,
+            max_bubble_vertices: 16,
+            max_bubble_internal_bases: 1000,
+            max_low_coverage_component_bases: 6,
+            low_coverage_component_max_multiplicity: 2,
+        };
+        let (removed, decisions) = remove_low_coverage_components_with_decisions(&mut g, &p);
+
+        assert_eq!(removed, 0);
+        assert!(decisions.is_empty());
+        assert_eq!(g.degree(a), 1);
+        assert_eq!(g.degree(b), 1);
     }
 }

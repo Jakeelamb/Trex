@@ -23,7 +23,7 @@ promotion-policy architecture on the single `trex illumina assemble` surface.
 | Paired de Bruijn / k-bimer thinking | Mate pairs are constraints between graph contexts with orientation and distance confidence, not just endpoint counters. | `mate_evidence` emits k-bimer-like constraint IDs, graph contexts, distance bins, support histograms, blockers, endpoint joins, and path links. |
 | Iterative simplification | Graph edits should be followed by recompression, reannotation, and replanning so later decisions see the current topology. | `simplification_policy` gains an edit/recompress/reannotate/replan scheduler. |
 | Bulge projection rather than blind deletion | When a branch is collapsed, retain enough provenance to explain where it went and to reuse it for future repeat/path reasoning. | `simplification.json` records projected/retained structures; GFA/path exports can cite them later. |
-| Contextual coverage | Coverage interpretation must be local. metaSPAdes shows why one global coverage threshold breaks under uneven depth and related strains. | `repeat_annotation` and `simplification_policy` use local ratios and adjacent-edge context, not only global multiplicity floors. |
+| Contextual coverage | Coverage interpretation must be local. metaSPAdes shows why one global coverage threshold breaks under uneven depth and related strains. | `repeat_annotation` and `simplification_policy` use local ratios, stronger-component context, and adjacent-edge context, not only global multiplicity floors. |
 | Repeat resolution by path evidence | SPAdes exSPAnder-style behavior combines graph paths, paired reads, and other long-range signals to extend paths only when one choice is sufficiently supported. | `path_scaffold_builder` promotes only representable paths first; FASTA scaffolds stay separate and policy-gated. |
 | Graph output as a primary artifact | SPAdes exposes assembly graph, contig paths, scaffold paths, and coverage tags. Trex should make graph/path output inspectable, not a debug afterthought. | `dbg/export.rs`, `scaffolds.json`, `scaffolds.fa`, and tagged GFA paths stay first-class outputs. |
 
@@ -57,10 +57,14 @@ promotion-policy architecture on the single `trex illumina assemble` surface.
 4. **Iterative simplification scheduler**: run planned edit, record
    recompress/reannotation hook status, replan the next pass from the current
    topology, and preserve decision ids across passes.
-5. **Projected-bulge provenance**: record collapsed or retained bubble
+5. **Low-copy component cleanup**: remove short disconnected low-copy components
+   only when the graph also contains stronger components, and record every
+   removal in `simplification.json`. This is an output-quality and scaling
+   cleanup step, not a substitute for repeat/path resolution.
+6. **Projected-bulge provenance**: record collapsed or retained bubble
    alternatives so later path/scaffold logic can distinguish deleted noise from
    biologically ambiguous structure.
-6. **Path-first repeat resolution**: use mate/path evidence to emit scaffold
+7. **Path-first repeat resolution**: use mate/path evidence to emit scaffold
    artifacts and GFA paths before any graph edit or primary FASTA mutation.
 
 ## Acceptance Rule

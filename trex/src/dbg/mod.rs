@@ -20,12 +20,13 @@ pub use export::{
 pub use graph::{build_dbg, DbgGraph};
 pub use orient::forward_representatives;
 pub use simplify::{
-    assert_no_self_loops, plan_tip_clips, remove_diamond_bubbles, remove_diamond_bubbles_ext,
-    remove_diamond_bubbles_ext_with_decisions, remove_tips, remove_tips_with_decisions,
-    run_simplification_schedule, DiploidSimplifyMode, GraphTopologySnapshot,
-    SimplificationHookStatus, SimplificationPassKind, SimplificationPassReport,
-    SimplificationScheduleReport, SimplifyDecision, SimplifyDecisionAction, SimplifyDecisionLog,
-    SimplifyParams, SimplifyStats,
+    assert_no_self_loops, plan_low_coverage_component_removals, plan_tip_clips,
+    remove_diamond_bubbles, remove_diamond_bubbles_ext, remove_diamond_bubbles_ext_with_decisions,
+    remove_low_coverage_components, remove_low_coverage_components_with_decisions, remove_tips,
+    remove_tips_with_decisions, run_simplification_schedule, DiploidSimplifyMode,
+    GraphTopologySnapshot, SimplificationHookStatus, SimplificationPassKind,
+    SimplificationPassReport, SimplificationScheduleReport, SimplifyDecision,
+    SimplifyDecisionAction, SimplifyDecisionLog, SimplifyParams, SimplifyStats,
 };
 pub use unitig::{extract_unitigs, stitch_sequence};
 pub use walk::{reference_contig_paths, ContigWalkTieBreak};

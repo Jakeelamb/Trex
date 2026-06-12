@@ -96,6 +96,7 @@ struct Row {
     claim_level: Option<String>,
     reference_availability: Option<String>,
     artifact_policy: Option<String>,
+    comparison_threads: Option<u16>,
     fixtures: Option<Vec<String>>,
     external_data: Option<String>,
     digest_manifest: Option<String>,
@@ -309,6 +310,7 @@ struct BenchRowReport {
     claim_level: String,
     reference_availability: String,
     artifact_policy: String,
+    comparison_threads: Option<u16>,
     tools: ToolAvailability,
     layer_status: RowLayerStatus,
     scripts: Vec<ScriptReport>,
@@ -570,6 +572,9 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
         validate_reference_availability(row_id, reference_availability)?;
         let artifact_policy = required_str(row.artifact_policy.as_deref(), idx, "artifact_policy")?;
         validate_artifact_policy(row_id, artifact_policy)?;
+        if row.comparison_threads == Some(0) {
+            return Err(format!("{row_id}: comparison_threads must be non-zero").into());
+        }
         let ci_tier = row
             .ci_tier
             .ok_or_else(|| format!("{row_id}: missing ci_tier"))?;
@@ -1524,6 +1529,7 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
             .artifact_policy
             .clone()
             .ok_or("validated row missing artifact_policy")?;
+        let comparison_threads = row.comparison_threads;
         let tools = tool_availability(
             row.required_tools.as_deref().unwrap_or(&[]),
             row.optional_tools.as_deref().unwrap_or(&[]),
@@ -1591,6 +1597,7 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
             claim_level,
             reference_availability,
             artifact_policy,
+            comparison_threads,
             tools,
             layer_status,
             scripts: script_reports,
@@ -3809,6 +3816,7 @@ product_claim = "observed parent-specific metric"
 claim_level = "observed"
 reference_availability = "parental_haplotypes"
 artifact_policy = "required"
+comparison_threads = 8
 fixtures = ["fixtures/phase2_synthetic/reads.fq"]
 required_tools = ["cargo"]
 artifacts = ["target/x/contigs.fa"]
@@ -3823,6 +3831,7 @@ parental_references = [
 ]
 "#;
         let matrix: Matrix = toml::from_str(text).expect("matrix");
+        assert_eq!(matrix.rows[0].comparison_threads, Some(8));
         let trex = matrix.rows[0].trex.as_ref().expect("trex");
         assert_eq!(trex.parental_references.len(), 2);
         assert_eq!(trex.parental_references[0].label, "parent1");

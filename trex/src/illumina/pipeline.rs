@@ -177,13 +177,16 @@ impl AssembleOutputs {
     }
 }
 
-/// Optional overrides for **Phase-1 graph simplification** (tips + bounded diamond bubbles).
+/// Optional overrides for **Phase-1 graph simplification** (tips + bounded diamond bubbles +
+/// low-copy component pruning).
 #[derive(Debug, Clone, Default)]
 pub struct SimplifyOverrides {
     pub max_tip_bases: Option<usize>,
     pub tip_max_multiplicity: Option<u64>,
     pub max_bubble_vertices: Option<usize>,
     pub max_bubble_internal_bases: Option<usize>,
+    pub max_low_coverage_component_bases: Option<usize>,
+    pub low_coverage_component_max_multiplicity: Option<u64>,
 }
 
 fn graph_checkpoint_identity(params: &AssembleParams) -> GraphCheckpointIdentity {
@@ -211,6 +214,12 @@ fn merge_simplify_params(k: usize, overrides: &SimplifyOverrides) -> SimplifyPar
     }
     if let Some(v) = overrides.max_bubble_internal_bases {
         p.max_bubble_internal_bases = v;
+    }
+    if let Some(v) = overrides.max_low_coverage_component_bases {
+        p.max_low_coverage_component_bases = v;
+    }
+    if let Some(v) = overrides.low_coverage_component_max_multiplicity {
+        p.low_coverage_component_max_multiplicity = v;
     }
     p
 }
@@ -518,6 +527,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
     tracing::info!(
         tips_removed = simplify_stats.tips_removed,
         diamond_bubbles_resolved = simplify_stats.diamond_bubbles_resolved,
+        low_coverage_components_removed = simplify_stats.low_coverage_components_removed,
         diploid_diamonds_retained = simplify_stats.diploid_diamonds_retained,
         repeat_guarded_diamonds_retained = simplify_stats.repeat_guarded_diamonds_retained,
         ambiguous_k22_diamonds_skipped = simplify_stats.ambiguous_k22_diamonds_skipped,

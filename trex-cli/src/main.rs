@@ -21,6 +21,8 @@ struct SimplifyFilePartial {
     tip_max_multiplicity: Option<u64>,
     max_bubble_vertices: Option<usize>,
     max_bubble_internal_bases: Option<usize>,
+    max_low_coverage_component_bases: Option<usize>,
+    low_coverage_component_max_multiplicity: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -131,6 +133,12 @@ enum IlluminaCmd {
         /// Internal sequence-span budget (bases) for automatic bubble resolution.
         #[arg(long)]
         max_bubble_internal_bases: Option<usize>,
+        /// Maximum span for pruning short disconnected low-copy components; 0 disables the pass.
+        #[arg(long)]
+        max_low_coverage_component_bases: Option<usize>,
+        /// Prune a short disconnected component only when every node multiplicity is **≤** this floor.
+        #[arg(long)]
+        low_coverage_component_max_multiplicity: Option<u64>,
         /// **Phase-2 Illumina diploid** (experimental): retain near-balanced diamond bubbles; tag GFA header.
         #[arg(long, default_value_t = false)]
         diploid: bool,
@@ -181,6 +189,8 @@ async fn main() -> std::process::ExitCode {
                 tip_max_multiplicity,
                 max_bubble_vertices,
                 max_bubble_internal_bases,
+                max_low_coverage_component_bases,
+                low_coverage_component_max_multiplicity,
                 diploid,
                 insert_mean_bp,
                 insert_stddev_bp,
@@ -276,6 +286,15 @@ async fn main() -> std::process::ExitCode {
                         .simplify
                         .as_ref()
                         .and_then(|s| s.max_bubble_internal_bases)),
+                    max_low_coverage_component_bases: max_low_coverage_component_bases.or(file_cfg
+                        .simplify
+                        .as_ref()
+                        .and_then(|s| s.max_low_coverage_component_bases)),
+                    low_coverage_component_max_multiplicity:
+                        low_coverage_component_max_multiplicity.or(file_cfg
+                            .simplify
+                            .as_ref()
+                            .and_then(|s| s.low_coverage_component_max_multiplicity)),
                 };
 
                 let diploid_params = DiploidParams {
@@ -353,6 +372,7 @@ async fn run_assemble(params: AssembleParams) -> Result<(), TrexError> {
         contigs = out.contig_count,
         tip_decisions = out.simplify_decisions.tips.len(),
         diamond_decisions = out.simplify_decisions.diamonds.len(),
+        component_decisions = out.simplify_decisions.components.len(),
         evidence_records = out.evidence.records.len(),
         bridge_candidates = out.scaffold_artifact.bridge_candidates.len(),
         endpoint_join_candidates = out.scaffold_artifact.endpoint_join_candidates.len(),
