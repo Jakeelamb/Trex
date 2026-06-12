@@ -121,6 +121,8 @@ struct TrexBench {
     args: Vec<String>,
     out_dir: String,
     reference: Option<String>,
+    confident_regions_bed: Option<String>,
+    variant_vcf: Option<String>,
     #[serde(default)]
     parental_references: Vec<ParentReference>,
 }
@@ -369,8 +371,10 @@ struct AssemblyMetrics {
     reference: Option<FastaStats>,
     contigs: Option<FastaStats>,
     unitigs: Option<FastaStats>,
+    scaffolds_fasta: Option<FastaStats>,
     gfa: Option<GfaStats>,
     evidence: Option<Value>,
+    trust: Option<Value>,
     annotations: Option<Value>,
     simplification: Option<Value>,
     scaffolds: Option<Value>,
@@ -380,6 +384,7 @@ struct AssemblyMetrics {
     diploid: Option<Value>,
     reference_quality: Option<ReferenceQuality>,
     parental_reference_quality: Vec<NamedReferenceQuality>,
+    confident_region_quality: Option<ConfidentRegionQuality>,
     read_assembly_quality: Option<ReadAssemblyKmerQuality>,
 }
 
@@ -426,6 +431,18 @@ struct NamedReferenceQuality {
     label: String,
     path: String,
     reference: FastaStats,
+    quality: ReferenceQuality,
+}
+
+#[derive(Serialize)]
+struct ConfidentRegionQuality {
+    bed_path: String,
+    regions_loaded: usize,
+    regions_overlapping_reference: usize,
+    confident_reference_bases: usize,
+    variant_vcf_path: Option<String>,
+    variant_records: usize,
+    variant_records_in_confident_regions: usize,
     quality: ReferenceQuality,
 }
 
@@ -2000,8 +2017,10 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         .transpose()?;
     let contigs = fasta_stats_optional(&out_dir.join("contigs.fa"))?;
     let unitigs = fasta_stats_optional(&out_dir.join("unitigs.fa"))?;
+    let scaffolds_fasta = fasta_stats_optional(&out_dir.join("scaffolds.fa"))?;
     let gfa = gfa_stats_optional(&out_dir.join("graph.gfa"))?;
     let evidence = json_summary_optional(&out_dir.join("evidence.json"))?;
+    let trust = json_summary_optional(&out_dir.join("trust.json"))?;
     let annotations = json_summary_optional(&out_dir.join("annotations.json"))?;
     let simplification = json_summary_optional(&out_dir.join("simplification.json"))?;
     let scaffolds = json_summary_optional(&out_dir.join("scaffolds.json"))?;
@@ -2023,6 +2042,28 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let parental_reference_quality = match kmer_size {
         Some(k) => parental_reference_quality(root, trex, &out_dir.join("contigs.fa"), k)?,
         None => Vec::new(),
+    };
+    let confident_region_quality = match (
+        trex.reference.as_deref(),
+        trex.confident_regions_bed.as_deref(),
+        kmer_size,
+    ) {
+        (Some(reference), Some(bed), Some(k)) => {
+            let contigs_path = out_dir.join("contigs.fa");
+            if contigs_path.exists() {
+                Some(confident_region_quality(
+                    root,
+                    reference,
+                    bed,
+                    trex.variant_vcf.as_deref(),
+                    &contigs_path,
+                    k,
+                )?)
+            } else {
+                None
+            }
+        }
+        _ => None,
     };
     let read_assembly_quality = match kmer_size {
         Some(k) => {
@@ -2052,8 +2093,10 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         reference,
         contigs,
         unitigs,
+        scaffolds_fasta,
         gfa,
         evidence,
+        trust,
         annotations,
         simplification,
         scaffolds,
@@ -2063,6 +2106,7 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         diploid,
         reference_quality,
         parental_reference_quality,
+        confident_region_quality,
         read_assembly_quality,
     })
 }
@@ -2342,21 +2386,31 @@ fn length_stats(mut lens: Vec<usize>) -> FastaStats {
 }
 
 fn fasta_sequences(path: &Path) -> DynResult<Vec<Vec<u8>>> {
+    Ok(fasta_records(path)?
+        .into_iter()
+        .map(|(_name, seq)| seq)
+        .collect())
+}
+
+fn fasta_records(path: &Path) -> DynResult<Vec<(String, Vec<u8>)>> {
     let text = fs::read_to_string(path)?;
-    let mut seqs = Vec::new();
+    let mut seqs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut name: Option<String> = None;
     let mut cur = Vec::new();
     for line in text.lines() {
-        if line.starts_with('>') {
-            if !cur.is_empty() {
-                seqs.push(cur);
+        if let Some(header) = line.strip_prefix('>') {
+            if let Some(prev) =
+                name.replace(header.split_whitespace().next().unwrap_or("").to_string())
+            {
+                seqs.push((prev, cur));
                 cur = Vec::new();
             }
         } else {
             cur.extend(line.trim().as_bytes().iter().map(u8::to_ascii_uppercase));
         }
     }
-    if !cur.is_empty() {
-        seqs.push(cur);
+    if let Some(name) = name {
+        seqs.push((name, cur));
     }
     Ok(seqs)
 }
@@ -2459,6 +2513,186 @@ fn parental_reference_quality(
         });
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BedRegion {
+    chrom: String,
+    start0: usize,
+    end0: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReferenceSpan {
+    chrom: String,
+    start0: usize,
+    end0: usize,
+}
+
+fn confident_region_quality(
+    root: &Path,
+    reference: &str,
+    bed: &str,
+    variant_vcf: Option<&str>,
+    contigs_path: &Path,
+    k: usize,
+) -> DynResult<ConfidentRegionQuality> {
+    let bed_path = root.join(bed);
+    let reference_path = root.join(reference);
+    let bed_regions = parse_bed_regions(&bed_path)?;
+    let reference_records = fasta_records(&reference_path)?;
+    let contigs = fasta_sequences(contigs_path)?;
+    let mut confident_sequences = Vec::new();
+    let mut overlapping_regions = 0usize;
+    let mut absolute_confident_regions = Vec::new();
+
+    for (name, seq) in &reference_records {
+        let span = reference_span(name, seq.len())?;
+        for region in bed_regions
+            .iter()
+            .filter(|region| region.chrom == span.chrom)
+        {
+            let start = region.start0.max(span.start0);
+            let end = region.end0.min(span.end0);
+            if start >= end {
+                continue;
+            }
+            overlapping_regions += 1;
+            absolute_confident_regions.push(BedRegion {
+                chrom: region.chrom.clone(),
+                start0: start,
+                end0: end,
+            });
+            let local_start = start - span.start0;
+            let local_end = end - span.start0;
+            confident_sequences.push(seq[local_start..local_end].to_vec());
+        }
+    }
+
+    let variant_records = match variant_vcf {
+        Some(path) => parse_vcf_sites(&root.join(path))?,
+        None => Vec::new(),
+    };
+    let variant_records_in_confident_regions = variant_records
+        .iter()
+        .filter(|variant| {
+            absolute_confident_regions.iter().any(|region| {
+                region.chrom == variant.chrom
+                    && variant.start0 >= region.start0
+                    && variant.start0 < region.end0
+            })
+        })
+        .count();
+    let confident_reference_bases = confident_sequences.iter().map(Vec::len).sum();
+    let quality = reference_quality_from_sequences(&confident_sequences, &contigs, k);
+
+    Ok(ConfidentRegionQuality {
+        bed_path: bed.to_string(),
+        regions_loaded: bed_regions.len(),
+        regions_overlapping_reference: overlapping_regions,
+        confident_reference_bases,
+        variant_vcf_path: variant_vcf.map(str::to_string),
+        variant_records: variant_records.len(),
+        variant_records_in_confident_regions,
+        quality,
+    })
+}
+
+fn parse_bed_regions(path: &Path) -> DynResult<Vec<BedRegion>> {
+    let text = read_text_maybe_gzip(path)?;
+    let mut regions = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let chrom = fields
+            .next()
+            .ok_or_else(|| format!("{}:{} missing BED chrom", path.display(), idx + 1))?;
+        let start0 = fields
+            .next()
+            .ok_or_else(|| format!("{}:{} missing BED start", path.display(), idx + 1))?
+            .parse::<usize>()?;
+        let end0 = fields
+            .next()
+            .ok_or_else(|| format!("{}:{} missing BED end", path.display(), idx + 1))?
+            .parse::<usize>()?;
+        if chrom.is_empty() || end0 <= start0 {
+            return Err(format!("{}:{} invalid BED interval", path.display(), idx + 1).into());
+        }
+        regions.push(BedRegion {
+            chrom: chrom.to_string(),
+            start0,
+            end0,
+        });
+    }
+    Ok(regions)
+}
+
+fn parse_vcf_sites(path: &Path) -> DynResult<Vec<BedRegion>> {
+    let text = read_text_maybe_gzip(path)?;
+    let mut sites = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let chrom = fields
+            .next()
+            .ok_or_else(|| format!("{}:{} missing VCF chrom", path.display(), idx + 1))?;
+        let pos1 = fields
+            .next()
+            .ok_or_else(|| format!("{}:{} missing VCF pos", path.display(), idx + 1))?
+            .parse::<usize>()?;
+        if chrom.is_empty() || pos1 == 0 {
+            return Err(format!("{}:{} invalid VCF site", path.display(), idx + 1).into());
+        }
+        sites.push(BedRegion {
+            chrom: chrom.to_string(),
+            start0: pos1 - 1,
+            end0: pos1,
+        });
+    }
+    Ok(sites)
+}
+
+fn read_text_maybe_gzip(path: &Path) -> DynResult<String> {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("gz") {
+        let output = Command::new("gzip").arg("-dc").arg(path).output()?;
+        if !output.status.success() {
+            return Err(format!("gzip -dc failed for {}", path.display()).into());
+        }
+        Ok(String::from_utf8(output.stdout)?)
+    } else {
+        Ok(fs::read_to_string(path)?)
+    }
+}
+
+fn reference_span(name: &str, len: usize) -> DynResult<ReferenceSpan> {
+    let Some((chrom, rest)) = name.split_once(':') else {
+        return Ok(ReferenceSpan {
+            chrom: name.to_string(),
+            start0: 0,
+            end0: len,
+        });
+    };
+    let Some((start, end)) = rest.split_once('-') else {
+        return Ok(ReferenceSpan {
+            chrom: name.to_string(),
+            start0: 0,
+            end0: len,
+        });
+    };
+    let start1 = start.replace(',', "").parse::<usize>()?;
+    let end1 = end.replace(',', "").parse::<usize>()?;
+    if chrom.is_empty() || start1 == 0 || end1 < start1 {
+        return Err(format!("invalid FASTA interval header {name:?}").into());
+    }
+    Ok(ReferenceSpan {
+        chrom: chrom.to_string(),
+        start0: start1 - 1,
+        end0: end1,
+    })
 }
 
 fn reference_quality_from_sequences(
@@ -3612,6 +3846,8 @@ parental_references = [
             args: vec![],
             out_dir: "out".to_string(),
             reference: None,
+            confident_regions_bed: None,
+            variant_vcf: None,
             parental_references: vec![
                 ParentReference {
                     label: "p1".to_string(),
@@ -3630,6 +3866,49 @@ parental_references = [
         assert_eq!(q[0].quality.contig_kmer_reference_fraction, 1.0);
         assert_eq!(q[1].label, "p2");
         assert_eq!(q[1].quality.contig_kmer_reference_fraction, 0.0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn confident_region_quality_scores_interval_reference_and_variants() {
+        let root = temp_root("confident-region-quality");
+        fs::create_dir_all(root.join("truth")).expect("truth dir");
+        fs::create_dir_all(root.join("out")).expect("out dir");
+        fs::write(
+            root.join("truth/ref.fa"),
+            b">chr20:10000000-10000009\nACGTACGTAC\n",
+        )
+        .expect("ref");
+        fs::write(
+            root.join("truth/confident.bed"),
+            b"chr20\t9999999\t10000004\nchr20\t10000008\t10000020\n",
+        )
+        .expect("bed");
+        fs::write(
+            root.join("truth/variants.vcf"),
+            b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr20\t10000002\t.\tC\tT\t.\tPASS\t.\nchr20\t10000007\t.\tG\tA\t.\tPASS\t.\n",
+        )
+        .expect("vcf");
+        fs::write(root.join("out/contigs.fa"), b">ctg\nACGTA\n").expect("contigs");
+
+        let q = confident_region_quality(
+            &root,
+            "truth/ref.fa",
+            "truth/confident.bed",
+            Some("truth/variants.vcf"),
+            &root.join("out/contigs.fa"),
+            3,
+        )
+        .expect("quality");
+
+        assert_eq!(q.regions_loaded, 2);
+        assert_eq!(q.regions_overlapping_reference, 2);
+        assert_eq!(q.confident_reference_bases, 6);
+        assert_eq!(q.variant_records, 2);
+        assert_eq!(q.variant_records_in_confident_regions, 1);
+        assert_eq!(q.quality.contig_kmers, 3);
+        assert_eq!(q.quality.contig_kmers_in_reference, 3);
 
         let _ = fs::remove_dir_all(root);
     }

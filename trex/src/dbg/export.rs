@@ -71,6 +71,7 @@ pub struct GfaWriteOptions<'a> {
     pub phase2_illumina_diploid: bool,
     pub diploid_unitig_links: Option<&'a [UnitigGfaLink]>,
     pub primary_contig_paths: &'a [(String, Vec<(usize, char)>)],
+    pub scaffold_paths: &'a [(String, Vec<(usize, char)>)],
     pub phase2_unphased_hap_paths: bool,
     pub parent_unitig_tags: Option<&'a [(usize, String)]>,
     pub parent_path_tags: Option<&'a [(String, String)]>,
@@ -427,6 +428,16 @@ pub fn write_gfa1(
         }
         writeln!(w)?;
     }
+    for (scf_name, steps) in options.scaffold_paths {
+        write!(w, "P\t{}\t", scf_name)?;
+        for (si, (utg_idx, orient)) in steps.iter().enumerate() {
+            if si > 0 {
+                write!(w, "\t")?;
+            }
+            write!(w, "utg{:06}{}", utg_idx, orient)?;
+        }
+        writeln!(w, "\t*\tTS:Z:trex-scaffold-sidecar\tGF:Z:scaffolds.fa")?;
+    }
     if options.phase2_illumina_diploid && options.phase2_unphased_hap_paths {
         for (ctg_name, steps) in options.primary_contig_paths {
             let hap_id = ctg_name.replacen("ctg", "p2h", 1);
@@ -454,7 +465,7 @@ mod tests {
 
     use super::{
         contig_path_matches_unitig_primary_path, contig_path_partition_full_unitigs,
-        primary_contig_paths_for_gfa, unitig_adjacency_links,
+        primary_contig_paths_for_gfa, unitig_adjacency_links, write_gfa1, GfaWriteOptions,
     };
     use crate::dbg::graph::DbgGraph;
 
@@ -529,5 +540,31 @@ mod tests {
         assert_eq!(links[0].from_orient, '+');
         assert_eq!(links[0].to_orient, '+');
         assert_eq!(links[0].overlap_cigar, "2M");
+    }
+
+    #[test]
+    fn gfa_export_writes_tagged_scaffold_sidecar_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.gfa");
+        let segments = vec![
+            ("utg000001".to_string(), b"AAAC".to_vec()),
+            ("utg000002".to_string(), b"ACCC".to_vec()),
+        ];
+        let scaffold_paths = vec![("scf000001".to_string(), vec![(1, '+'), (2, '+')])];
+
+        write_gfa1(
+            &path,
+            &segments,
+            GfaWriteOptions {
+                scaffold_paths: &scaffold_paths,
+                ..GfaWriteOptions::default()
+            },
+        )
+        .expect("write gfa");
+
+        let text = std::fs::read_to_string(path).expect("read gfa");
+        assert!(text.contains(
+            "P\tscf000001\tutg000001+\tutg000002+\t*\tTS:Z:trex-scaffold-sidecar\tGF:Z:scaffolds.fa\n"
+        ));
     }
 }

@@ -54,6 +54,46 @@ Trex implications:
 - Treat GFA as the carrier for unresolved structure, not only as a debug sidecar.
 - Future long-read tracks should not reuse the Illumina DBG interface directly; they need an evidence-to-graph adapter.
 
+## Bankevich et al. 2012 — SPAdes
+
+Paper: source-indexed in [`literature/sources.md`](../sources.md). The original
+article is not archived locally; the Trex architecture reading is cross-checked
+against the SPAdes manual and the archived metaSPAdes paper.
+
+Main functions:
+
+- Correct reads before assembly.
+- Build de Bruijn graphs over a ladder of k-mer sizes.
+- Use paired-read information as graph-context constraints rather than only as
+  final contig ordering.
+- Simplify the graph through repeated cleanup of errors, tips, bulges, and
+  repeat-like structures.
+- Emit sequence outputs together with graph/path artifacts.
+
+Core techniques:
+
+- Multi-*k* graph construction and checkpointable per-*k* iterations.
+- Paired de Bruijn graph / k-bimer-style reasoning for distance-aware graph
+  constraints.
+- Bulge projection/provenance instead of losing all information about collapsed
+  alternatives.
+- Iterative graph cleanup where topology changes are followed by graph
+  normalization before later decisions.
+- Assembly graph and path outputs as inspectable deliverables.
+
+Trex implications:
+
+- Keep `--auto-k` and explicit ladders as inspectable select-one evidence until
+  cross-*k* graph merging has its own tests and benchmark gates.
+- Add read-trust diagnostics before any correction path is allowed to change
+  graph construction.
+- Grow mate evidence toward oriented graph-context constraints with distance
+  histograms and conflict clusters.
+- Add a simplification scheduler that explicitly alternates edit,
+  recompress, reannotate, and replan.
+- Preserve collapsed/retained branch provenance for future repeat and scaffold
+  reasoning.
+
 ## Nurk et al. 2017 — metaSPAdes
 
 Paper: [`2017-nurk-metaspades.pdf`](../papers/2017-nurk-metaspades.pdf)

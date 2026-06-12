@@ -6,8 +6,8 @@ schema_version = 1
 [[modules]]
 id = "read_correction_trust"
 phase = "phase2_illumina"
-status = "planned"
-summary = "Read correction and trusted k-mer model that separates sequencing noise from graph evidence before topology is built."
+status = "active"
+summary = "Read correction and trusted k-mer model that separates sequencing noise from graph evidence before topology is built; currently report-only through trust.json."
 papers = [
   "literature/papers/2017-nurk-metaspades.pdf",
   "literature/papers/2020-rhie-merqury.pdf",
@@ -16,6 +16,7 @@ papers = [
 current_files = [
   "trex/src/illumina/preprocess.rs",
   "trex/src/illumina/counts.rs",
+  "trex/src/illumina/trust.rs",
   "trex/src/kmer.rs",
 ]
 promotion_stages = [
@@ -26,7 +27,7 @@ gates = [
   "cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json",
 ]
 next_work = [
-  "Add trusted k-mer diagnostics that can explain why reads or k-mers were excluded.",
+  "Add read-span support and concrete correction-candidate evidence to trust.json.",
   "Keep correction report-only until read-vs-assembly quality and regression fixtures prove it improves output.",
 ]
 
@@ -53,7 +54,7 @@ gates = [
   "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json",
 ]
 next_work = [
-  "Add selected-k checkpoint namespacing before enabling resume in ladder mode.",
+  "Benchmark schema-v2 multi_k.json graph-pressure score terms on biological rows before widening auto-k defaults.",
   "Keep graph merging deferred until select-one behavior is benchmarked across bacterial and diploid rows.",
 ]
 
@@ -107,7 +108,7 @@ gates = [
   "bash scripts/phase2_illumina_haplotype_metrics.sh",
 ]
 next_work = [
-  "Add repeat-aware vetoes to existing tip and bubble decisions before stronger cleanup modes.",
+  "Add an explicit edit/recompress/reannotate/replan simplification loop before stronger cleanup modes.",
   "Expose policy-mode summaries in benchmark JSON before changing default graph edits.",
 ]
 
@@ -135,14 +136,14 @@ gates = [
   "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json",
 ]
 next_work = [
-  "Add orientation and distance confidence fields to endpoint join records.",
+  "Grow endpoint joins toward k-bimer-like mate constraints with orientation, distance histograms, and conflict clusters.",
   "Reject conflicting mate clusters before any path/scaffold promotion.",
 ]
 
 [[modules]]
 id = "promotion_policy"
 phase = "phase2_illumina"
-status = "planned"
+status = "active"
 summary = "Explicit rules that convert accumulated evidence into report-only records, scaffold artifacts, GFA paths, FASTA scaffolds, graph edits, or polishing edits."
 papers = [
   "literature/papers/2017-wick-unicycler.pdf",
@@ -150,6 +151,7 @@ papers = [
   "literature/papers/2020-rhie-merqury.pdf",
 ]
 current_files = [
+  "trex/src/illumina/promotion.rs",
   "docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md",
   "trex/src/illumina/scaffold.rs",
   "trex/src/dbg/export.rs",
@@ -167,7 +169,7 @@ gates = [
   "cargo run -p xtask -- gate --tier pr",
 ]
 next_work = [
-  "Move scaffold and audit promotion thresholds into one policy surface.",
+  "Extend the policy surface from endpoint joins into audit and polishing candidates.",
   "Require benchmark artifacts before changing any stage that mutates FASTA or graph topology.",
 ]
 

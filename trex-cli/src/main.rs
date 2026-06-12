@@ -375,6 +375,7 @@ async fn run_assemble(params: AssembleParams) -> Result<(), TrexError> {
         annotations_json = %out.outputs.annotations_path().display(),
         simplification_json = %out.outputs.simplification_path().display(),
         scaffolds_json = %out.outputs.scaffolds_path().display(),
+        scaffolds_fasta = %out.outputs.scaffolds_fasta_path().display(),
         multi_k_json = %out.outputs.multi_k_path().display(),
         fragmentation_json = %out.outputs.fragmentation_path().display(),
         audit_json = %out.outputs.audit_json_path().display(),

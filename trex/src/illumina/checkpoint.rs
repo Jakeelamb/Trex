@@ -46,6 +46,12 @@ impl CheckpointRoot {
         self.preprocess_dir().join("pair_layout.json")
     }
 
+    pub fn selected_k_root(&self, k: usize) -> Self {
+        Self {
+            root: self.root.join(format!("selected-k-{k}")),
+        }
+    }
+
     pub fn counts_dir(&self) -> PathBuf {
         self.root.join("counts")
     }

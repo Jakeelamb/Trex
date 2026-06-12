@@ -6,7 +6,6 @@ use trex::illumina::multik::MultiKParams;
 use trex::illumina::pipeline::{
     assemble_illumina, AssembleOutputs, AssembleParams, DiploidParams, SimplifyOverrides,
 };
-use trex::{IngestError, TrexError};
 
 fn write_tmp(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
     let p = dir.join(name);
@@ -180,7 +179,13 @@ fn annotations_sidecar_preserves_phase1_golden_outputs() {
     }
     let annotations = std::fs::read_to_string(out.outputs.annotations_path()).unwrap();
     assert!(annotations.contains("\"summary\""));
+    let trust = std::fs::read_to_string(out.outputs.trust_path()).unwrap();
+    assert!(trust.contains("\"report_only\""));
+    assert!(trust.contains("\"trusted_fraction\""));
+    assert!(trust.contains("\"correction_candidates\""));
     let simplification = std::fs::read_to_string(out.outputs.simplification_path()).unwrap();
+    assert!(simplification.contains("\"scheduler\""));
+    assert!(simplification.contains("\"spades_iterative_v1\""));
     assert!(simplification.contains("\"tips\""));
     assert!(simplification.contains("\"diamonds\""));
     let scaffolds = std::fs::read_to_string(out.outputs.scaffolds_path()).unwrap();
@@ -227,18 +232,21 @@ fn multi_k_ladder_selects_one_graph_and_writes_sidecar() {
     let multi_k = std::fs::read_to_string(out.outputs.multi_k_path()).unwrap();
     assert!(multi_k.contains("\"schema_version\""));
     assert!(multi_k.contains("\"selected_k\""));
+    assert!(multi_k.contains("\"dead_end_score\""));
+    assert!(multi_k.contains("\"score_terms\""));
 }
 
 #[test]
-fn multi_k_ladder_rejects_checkpoint_root_until_checkpoint_identity_supports_selected_k() {
+fn multi_k_ladder_uses_selected_k_checkpoint_namespace() {
     let dir = tempfile::tempdir().unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let params = AssembleParams {
+    let checkpoint_root = dir.path().join("ck");
+    let mut params = AssembleParams {
         r1_path: root.join("fixtures/tiny.fq"),
         r2_path: None,
         k: 4,
         trusted_threshold: 1,
-        checkpoint_root: Some(dir.path().join("ck")),
+        checkpoint_root: Some(checkpoint_root.clone()),
         resume: false,
         strict_checkpoints: false,
         simplify: SimplifyOverrides::default(),
@@ -250,11 +258,23 @@ fn multi_k_ladder_rejects_checkpoint_root_until_checkpoint_identity_supports_sel
         outputs: outputs_in(dir.path()),
     };
 
-    let err = assemble_illumina(&params).expect_err("multi-k checkpoints are not supported yet");
-    assert!(matches!(
-        err,
-        TrexError::Ingest(IngestError::MultiKCheckpointUnsupported)
-    ));
+    let first = assemble_illumina(&params).unwrap();
+    let selected_dir =
+        checkpoint_root.join(format!("selected-k-{}", first.multi_k_selection.selected_k));
+    assert!(checkpoint_root.join("preprocess/reads.jsonl").exists());
+    assert!(selected_dir.join("counts/kmer_counts.json").exists());
+    assert!(selected_dir.join("graph/simplified_dbg.json").exists());
+    assert!(selected_dir.join("export/sequences.json").exists());
+
+    params.resume = true;
+    let second = assemble_illumina(&params).unwrap();
+
+    assert_eq!(
+        first.multi_k_selection.selected_k,
+        second.multi_k_selection.selected_k
+    );
+    assert_eq!(first.unitig_count, second.unitig_count);
+    assert_eq!(first.contig_count, second.contig_count);
 }
 
 #[test]
@@ -493,19 +513,91 @@ fn mate_endpoint_join_candidates_are_report_only_for_missing_dbg_edges() {
     assert_eq!(with.scaffold_artifact.bridge_candidates.len(), 1);
     assert_eq!(with.scaffold_artifact.endpoint_join_candidates.len(), 1);
     assert!(with.scaffold_artifact.paths.is_empty());
+    assert!(!with.scaffold_artifact.endpoint_join_candidates[0].accepted);
+    assert_eq!(
+        with.scaffold_artifact.endpoint_join_candidates[0]
+            .rejection_reason
+            .as_deref(),
+        Some("candidate has fewer than two supporting pairs")
+    );
+    assert_eq!(
+        with.scaffold_artifact.endpoint_join_candidates[0].promotion_stage,
+        "report_only_candidate"
+    );
     assert_eq!(
         with.scaffold_artifact.endpoint_join_candidates[0].source,
-        "mate_pair_endpoint_join_report_only"
+        "mate_pair_endpoint_join_rejected"
     );
     assert_eq!(
         std::fs::read(with.outputs.contigs_path()).unwrap(),
         std::fs::read(without.outputs.contigs_path()).unwrap()
     );
     let scaffolds = std::fs::read_to_string(with.outputs.scaffolds_path()).unwrap();
+    assert!(scaffolds.contains("\"promotion_policy\""));
+    assert!(scaffolds.contains("\"min_support_pairs\""));
     assert!(scaffolds.contains("\"endpoint_join_candidates\""));
+    assert!(scaffolds.contains("\"promotion_stage\""));
     assert!(scaffolds.contains("\"orientation\""));
     assert!(scaffolds.contains("\"estimated_gap_bp\""));
     assert!(scaffolds.contains("\"confidence\""));
+}
+
+#[test]
+fn mate_endpoint_join_acceptance_emits_scaffold_fasta_and_gfa_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let r1 = write_tmp(
+        dir.path(),
+        "r1.fq",
+        b"@frag1/1\nAAAACGT\n+\nIIIIIII\n@frag2/1\nAAAACGT\n+\nIIIIIII\n",
+    );
+    let r2 = write_tmp(
+        dir.path(),
+        "r2.fq",
+        b"@frag1/2\nTTAAGGG\n+\nIIIIIII\n@frag2/2\nTTAAGGG\n+\nIIIIIII\n",
+    );
+
+    let params = AssembleParams {
+        r1_path: r1,
+        r2_path: Some(r2),
+        k: 4,
+        trusted_threshold: 1,
+        checkpoint_root: None,
+        resume: false,
+        strict_checkpoints: false,
+        simplify: SimplifyOverrides::default(),
+        diploid: DiploidParams {
+            enabled: true,
+            insert_mean_bp: Some(8),
+            insert_stddev_bp: None,
+            ..Default::default()
+        },
+        multi_k: Default::default(),
+        outputs: outputs_in(dir.path()),
+    };
+
+    let result = assemble_illumina(&params).unwrap();
+
+    assert_eq!(result.scaffold_artifact.endpoint_join_candidates.len(), 1);
+    assert!(result.scaffold_artifact.endpoint_join_candidates[0].accepted);
+    assert_eq!(
+        result.scaffold_artifact.endpoint_join_candidates[0].promotion_stage,
+        "scaffold_artifact"
+    );
+    assert_eq!(
+        result.scaffold_artifact.endpoint_join_candidates[0].source,
+        "mate_pair_endpoint_join_promoted_sidecar"
+    );
+    assert_eq!(result.scaffold_artifact.paths.len(), 1);
+
+    let scaffolds_fasta = std::fs::read_to_string(result.outputs.scaffolds_fasta_path()).unwrap();
+    assert!(scaffolds_fasta.contains(">scf000001"));
+    assert!(scaffolds_fasta.lines().any(|line| !line.starts_with('>')));
+
+    let gfa = std::fs::read_to_string(result.outputs.gfa_path_resolved()).unwrap();
+    assert!(gfa.contains("P\tscf000001\t"));
+    assert!(gfa.contains("utg000001+\tutg000002-"));
+    assert!(gfa.contains("TS:Z:trex-scaffold-sidecar"));
+    assert!(gfa.contains("GF:Z:scaffolds.fa"));
 }
 
 #[test]

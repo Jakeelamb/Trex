@@ -8,12 +8,19 @@ The operating rule is conservative: evidence becomes behavior only through an ex
 
 | Source family | Lesson Trex adopts | Contract consequence |
 |---------------|--------------------|----------------------|
-| SPAdes / metaSPAdes | Multi-*k* DBG assembly, contextual coverage, paired-end scaffolding. | Build independent candidate graphs, score them, and avoid treating coverage as globally uniform. |
+| SPAdes / metaSPAdes | Multi-*k* DBG assembly, read correction before graph construction, paired DBG/k-bimer-style constraints, contextual coverage, iterative simplification, and graph/path outputs. | Build independent candidate graphs, score them, preserve mate/path evidence as constraints, replan after topology edits, and avoid treating coverage as globally uniform. |
 | Unicycler | Bridges should be evidence-scored and promoted by confidence. | Mate/path bridges first become ranked artifacts, then paths, then sequence only under policy. |
 | Pilon | Audit suspicious sequence before correcting it. | Polishing starts as `audit.json` / `audit.tsv`; sequence repair needs explicit before/after evidence. |
 | Merqury | K-mer truth is a primary quality signal. | Read-vs-assembly and parent/reference k-mer metrics gate quality and promotion claims. |
 | Canu / ABruijn / Flye-style graph thinking | Preserve ambiguity and expose paths instead of forcing one contig too early. | GFA/path artifacts carry unresolved ambiguity; primary FASTA remains conservative. |
 | T2T-era and diploid work | Biological interpretation and phasing claims need evidence labels. | Diploid output labels ambiguity and parent-specific support without claiming full haplotype FASTA. |
+
+The SPAdes-specific translation for Trex lives in
+[`docs/SPADES_ARCHITECTURE_INSPIRATION.md`](SPADES_ARCHITECTURE_INSPIRATION.md).
+Its key constraint is that Trex borrows the architecture pressure, not hidden
+behavior: read trust, multi-*k*, mate constraints, simplification, and path
+resolution must remain visible in typed artifacts before they can mutate graph
+topology or primary sequence.
 
 ## Layer 1: Assembler Architecture Blueprint
 
@@ -26,12 +33,14 @@ Responsibilities:
 - Own FASTQ/FASTA ingestion quality checks, canonical k-mer counts, trusted k-mer thresholds, and future correction candidates.
 - Explain why a k-mer, read segment, or corrected base is trusted, rejected, or ambiguous.
 - Emit diagnostics before modifying reads.
+- Preserve the SPAdes-style correction boundary as a Trex report-only stage until quality gates prove that corrected reads improve assembly output.
 
 Core data types:
 
 - `TrustedKmerSet`: canonical k-mer plus count, quality class, and source read support.
 - `CorrectionCandidate`: read id/span, original sequence, proposed sequence, support, and rejection reason.
 - `TrustSummary`: candidate count, accepted trusted count, rejected count, and low-support strata.
+- `TrustDiagnosticsReport`: report-only `trust.json` schema with threshold, trusted fraction, multiplicity buckets, and correction-candidate placeholder.
 
 Test obligations:
 
@@ -46,10 +55,11 @@ Responsibilities:
 - Build candidate DBG graphs independently for an explicit k ladder.
 - Score candidates using read k-mer completeness, branchiness, contiguity, repeat risk, and benchmark metadata.
 - Select one graph first; graph merging is a later contract.
+- Preserve per-*k* provenance so selected-*k* checkpoint reuse, rejection reasons, and future cross-*k* annotations are auditable.
 
 Core data types:
 
-- `KGraphCandidate`: k, graph summary, trusted-read completeness, branch/tangle counters, repeat-risk counters.
+- `KGraphCandidate`: k, graph summary, trusted-read completeness, dead-end rate, branch/tangle counters, repeat-risk counters, graph-density pressure, and weighted score terms.
 - `KSelectionDecision`: selected k, rejected candidates, score terms, and reason.
 - `KGraphArtifact`: `multi_k.json` plus selected-k namespace for future checkpoints.
 
@@ -86,6 +96,7 @@ Responsibilities:
 - Convert graph plus evidence into planned tip, bubble, repeat, and diploid decisions before mutation.
 - Preserve default behavior unless a policy mode is explicitly enabled and benchmarked.
 - Refuse edits on repeat-like or diploid-ambiguous structures unless policy allows them.
+- After any topology edit, make recompression, reannotation, and replanning explicit instead of letting later decisions use stale graph context.
 
 Core data types:
 
@@ -106,6 +117,7 @@ Responsibilities:
 - Interpret paired-end orientation, insert-distance priors, endpoint support, conflicts, and mate clusters.
 - Rank bridge candidates without adding DBG edges by default.
 - Provide evidence that can be promoted into scaffold artifacts or paths.
+- Grow endpoint evidence toward k-bimer-like graph-context constraints with distance histograms and conflict clusters before graph edits are considered.
 
 Core data types:
 

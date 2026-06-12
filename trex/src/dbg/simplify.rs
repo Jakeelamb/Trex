@@ -15,6 +15,7 @@ pub enum SimplifyDecisionAction {
     RemoveTipEdge,
     RemoveDiamondBranch,
     RetainDiploidDiamond,
+    RetainRepeatGuardedDiamond,
     SkipAmbiguousK22Diamond,
 }
 
@@ -29,10 +30,23 @@ pub struct SimplifyDecision {
     pub score_b: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SimplifyDecisionLog {
+    pub schema_version: u64,
+    pub scheduler: SimplificationScheduleReport,
     pub tips: Vec<SimplifyDecision>,
     pub diamonds: Vec<SimplifyDecision>,
+}
+
+impl Default for SimplifyDecisionLog {
+    fn default() -> Self {
+        Self {
+            schema_version: 2,
+            scheduler: SimplificationScheduleReport::default(),
+            tips: Vec::new(),
+            diamonds: Vec::new(),
+        }
+    }
 }
 
 /// Decision counters from automatic graph simplification.
@@ -41,7 +55,95 @@ pub struct SimplifyStats {
     pub tips_removed: usize,
     pub diamond_bubbles_resolved: usize,
     pub diploid_diamonds_retained: usize,
+    pub repeat_guarded_diamonds_retained: usize,
     pub ambiguous_k22_diamonds_skipped: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimplificationPassKind {
+    TipClipping,
+    DiamondBubbles,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimplificationHookStatus {
+    NotNeeded,
+    TopologySnapshotOnly,
+    DownstreamAfterSchedule,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GraphTopologySnapshot {
+    pub k: usize,
+    pub trusted_nodes: usize,
+    pub adjacency_nodes: usize,
+    pub isolated_nodes: usize,
+    pub undirected_edges: usize,
+    pub self_loops: usize,
+    pub max_degree: usize,
+}
+
+impl GraphTopologySnapshot {
+    fn from_graph(graph: &DbgGraph) -> Self {
+        let directed_edges: usize = graph.adj.values().map(|neighbors| neighbors.len()).sum();
+        let self_loops = graph
+            .adj
+            .iter()
+            .filter(|(node, neighbors)| neighbors.contains_key(node.as_slice()))
+            .count();
+        let trusted_nodes = graph.node_mul.len();
+        let adjacency_nodes = graph.adj.len();
+        Self {
+            k: graph.k,
+            trusted_nodes,
+            adjacency_nodes,
+            isolated_nodes: trusted_nodes.saturating_sub(adjacency_nodes),
+            undirected_edges: (directed_edges.saturating_add(self_loops)) / 2,
+            self_loops,
+            max_degree: graph
+                .adj
+                .values()
+                .map(std::collections::BTreeMap::len)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimplificationPassReport {
+    pub pass_index: usize,
+    pub pass: SimplificationPassKind,
+    pub before: GraphTopologySnapshot,
+    pub after: GraphTopologySnapshot,
+    pub planned_decisions: usize,
+    pub emitted_decisions: usize,
+    pub graph_edits: usize,
+    pub topology_changed: bool,
+    pub replan_next_pass: bool,
+    pub recompress_hook: SimplificationHookStatus,
+    pub reannotation_hook: SimplificationHookStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimplificationScheduleReport {
+    pub mode: String,
+    pub initial_topology: GraphTopologySnapshot,
+    pub final_topology: GraphTopologySnapshot,
+    pub passes: Vec<SimplificationPassReport>,
+}
+
+impl Default for SimplificationScheduleReport {
+    fn default() -> Self {
+        Self {
+            mode: "spades_iterative_v1".to_string(),
+            initial_topology: GraphTopologySnapshot::default(),
+            final_topology: GraphTopologySnapshot::default(),
+            passes: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +178,92 @@ impl SimplifyParams {
             max_bubble_internal_bases: (8 * k).max(32),
         }
     }
+}
+
+pub fn run_simplification_schedule(
+    graph: &mut DbgGraph,
+    p: &SimplifyParams,
+    diploid: Option<DiploidSimplifyMode>,
+) -> (SimplifyStats, SimplifyDecisionLog) {
+    let initial_topology = GraphTopologySnapshot::from_graph(graph);
+    let mut passes = Vec::new();
+
+    let tips_before = GraphTopologySnapshot::from_graph(graph);
+    let planned_tips = plan_tip_clips(graph, p).len();
+    let (tips_removed, tip_decisions) = remove_tips_with_decisions(graph, p);
+    let tips_after = GraphTopologySnapshot::from_graph(graph);
+    let tips_changed = tips_before != tips_after;
+    passes.push(SimplificationPassReport {
+        pass_index: 0,
+        pass: SimplificationPassKind::TipClipping,
+        before: tips_before,
+        after: tips_after,
+        planned_decisions: planned_tips,
+        emitted_decisions: tip_decisions.len(),
+        graph_edits: tips_removed,
+        topology_changed: tips_changed,
+        replan_next_pass: true,
+        recompress_hook: if tips_changed {
+            SimplificationHookStatus::TopologySnapshotOnly
+        } else {
+            SimplificationHookStatus::NotNeeded
+        },
+        reannotation_hook: if tips_changed {
+            SimplificationHookStatus::DownstreamAfterSchedule
+        } else {
+            SimplificationHookStatus::NotNeeded
+        },
+    });
+
+    let diamonds_before = GraphTopologySnapshot::from_graph(graph);
+    let (diamond_stats, diamond_decisions) =
+        remove_diamond_bubbles_ext_with_decisions(graph, p, diploid);
+    let diamonds_after = GraphTopologySnapshot::from_graph(graph);
+    let diamonds_changed = diamonds_before != diamonds_after;
+    passes.push(SimplificationPassReport {
+        pass_index: 1,
+        pass: SimplificationPassKind::DiamondBubbles,
+        before: diamonds_before,
+        after: diamonds_after,
+        planned_decisions: diamond_decisions.len(),
+        emitted_decisions: diamond_decisions.len(),
+        graph_edits: diamond_stats.diamond_bubbles_resolved,
+        topology_changed: diamonds_changed,
+        replan_next_pass: false,
+        recompress_hook: if diamonds_changed {
+            SimplificationHookStatus::TopologySnapshotOnly
+        } else {
+            SimplificationHookStatus::NotNeeded
+        },
+        reannotation_hook: if diamonds_changed {
+            SimplificationHookStatus::DownstreamAfterSchedule
+        } else {
+            SimplificationHookStatus::NotNeeded
+        },
+    });
+
+    let final_topology = GraphTopologySnapshot::from_graph(graph);
+    let stats = SimplifyStats {
+        tips_removed,
+        diamond_bubbles_resolved: diamond_stats.diamond_bubbles_resolved,
+        diploid_diamonds_retained: diamond_stats.diploid_diamonds_retained,
+        repeat_guarded_diamonds_retained: diamond_stats.repeat_guarded_diamonds_retained,
+        ambiguous_k22_diamonds_skipped: diamond_stats.ambiguous_k22_diamonds_skipped,
+    };
+    (
+        stats,
+        SimplifyDecisionLog {
+            schema_version: 2,
+            scheduler: SimplificationScheduleReport {
+                mode: "spades_iterative_v1".to_string(),
+                initial_topology,
+                final_topology,
+                passes,
+            },
+            tips: tip_decisions,
+            diamonds: diamond_decisions,
+        },
+    )
 }
 
 /// Iteratively remove short low-coverage tips (degree-1 leaves).
@@ -234,6 +422,36 @@ fn branch_scores_nearly_balanced(s_a: u64, s_b: u64, max_relative_diff_percent: 
     (hi - lo).saturating_mul(100) <= hi.saturating_mul(max_relative_diff_percent)
 }
 
+fn graph_baseline_multiplicity(graph: &DbgGraph) -> u64 {
+    let mut values: Vec<u64> = graph
+        .node_mul
+        .values()
+        .copied()
+        .filter(|value| *value > 0)
+        .collect();
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
+fn repeat_guarded_branch(graph: &DbgGraph, baseline: u64, nodes: [&[u8]; 2]) -> bool {
+    if baseline == 0 {
+        return false;
+    }
+    nodes.iter().any(|node| {
+        graph
+            .node_mul
+            .get(*node)
+            .copied()
+            .map(|multiplicity| {
+                multiplicity > baseline && multiplicity >= baseline.saturating_mul(2)
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// Resolve **diamond** bubbles `u–a–m` vs `u–b–m` when both `a` and `b` are degree-2 junctions and
 /// the motif fits **Phase-1 bubble bounds**. Lower-scoring branch (read-edge support) is removed.
 ///
@@ -254,6 +472,7 @@ pub fn remove_diamond_bubbles_ext_with_decisions(
 ) -> (SimplifyStats, Vec<SimplifyDecision>) {
     let mut stats = SimplifyStats::default();
     let mut retained_diploid_motifs: BTreeSet<Vec<Vec<u8>>> = BTreeSet::new();
+    let mut repeat_guarded_motifs: BTreeSet<Vec<Vec<u8>>> = BTreeSet::new();
     let mut skipped_k22_motifs: BTreeSet<Vec<Vec<u8>>> = BTreeSet::new();
     let mut decisions = Vec::new();
     if p.max_bubble_vertices < 4 {
@@ -263,6 +482,7 @@ pub fn remove_diamond_bubbles_ext_with_decisions(
     if est_bases > p.max_bubble_internal_bases {
         return (stats, decisions);
     }
+    let baseline_multiplicity = graph_baseline_multiplicity(graph);
 
     loop {
         let verts: Vec<Vec<u8>> = graph.adj.keys().cloned().collect();
@@ -333,6 +553,24 @@ pub fn remove_diamond_bubbles_ext_with_decisions(
 
                 let s_a = branch_score(graph, &u, a, &m);
                 let s_b = branch_score(graph, &u, b, &m);
+                if repeat_guarded_branch(graph, baseline_multiplicity, [a, b]) {
+                    let mut motif = vec![u.clone(), a.clone(), b.clone(), m.clone()];
+                    motif.sort_by(|x, y| cmp_dna(x, y));
+                    if repeat_guarded_motifs.insert(motif) {
+                        stats.repeat_guarded_diamonds_retained += 1;
+                        decisions.push(SimplifyDecision {
+                            action: SimplifyDecisionAction::RetainRepeatGuardedDiamond,
+                            reason: "repeat-aware guardrail retained diamond with high-copy branch"
+                                .to_string(),
+                            nodes: sorted_node_labels([&u, a, b, &m]),
+                            removed_node: None,
+                            removed_edge: None,
+                            score_a: Some(s_a),
+                            score_b: Some(s_b),
+                        });
+                    }
+                    continue;
+                }
                 if diploid.is_some() && branch_scores_nearly_balanced(s_a, s_b, 5) {
                     let mut motif = vec![u.clone(), a.clone(), b.clone(), m.clone()];
                     motif.sort_by(|x, y| cmp_dna(x, y));
@@ -514,6 +752,64 @@ mod tests {
     }
 
     #[test]
+    fn simplification_schedule_records_pass_order_and_topology_delta() {
+        let k = 4usize;
+        let tip = b"AAAT";
+        let hub = b"AAAC";
+        let keep_a = b"AACC";
+        let keep_b = b"ACCC";
+        let mut g = DbgGraph::new(k, {
+            let mut mm = BTreeMap::new();
+            mm.insert(tip.to_vec(), 1);
+            mm.insert(hub.to_vec(), 10);
+            mm.insert(keep_a.to_vec(), 10);
+            mm.insert(keep_b.to_vec(), 10);
+            mm
+        });
+        g.add_undirected_edge(tip, hub, 1).unwrap();
+        g.add_undirected_edge(hub, keep_a, 10).unwrap();
+        g.add_undirected_edge(hub, keep_b, 10).unwrap();
+
+        let p = SimplifyParams {
+            max_tip_bases: 12,
+            tip_max_multiplicity: 2,
+            max_bubble_vertices: 16,
+            max_bubble_internal_bases: 1000,
+        };
+        let (stats, report) = run_simplification_schedule(&mut g, &p, None);
+
+        assert_eq!(stats.tips_removed, 1);
+        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.scheduler.mode, "spades_iterative_v1");
+        assert_eq!(report.scheduler.passes.len(), 2);
+        assert_eq!(
+            report.scheduler.passes[0].pass,
+            SimplificationPassKind::TipClipping
+        );
+        assert_eq!(
+            report.scheduler.passes[1].pass,
+            SimplificationPassKind::DiamondBubbles
+        );
+        assert_eq!(report.scheduler.passes[0].planned_decisions, 1);
+        assert_eq!(report.scheduler.passes[0].graph_edits, 1);
+        assert!(report.scheduler.passes[0].topology_changed);
+        assert_eq!(
+            report.scheduler.passes[0].recompress_hook,
+            SimplificationHookStatus::TopologySnapshotOnly
+        );
+        assert_eq!(
+            report.scheduler.passes[0].reannotation_hook,
+            SimplificationHookStatus::DownstreamAfterSchedule
+        );
+        assert_eq!(report.tips.len(), 1);
+        assert!(report.diamonds.is_empty());
+        assert_eq!(
+            report.scheduler.final_topology,
+            GraphTopologySnapshot::from_graph(&g)
+        );
+    }
+
+    #[test]
     fn diamond_removes_lower_branch() {
         let k = 4usize;
         let u = b"AAAA".to_vec();
@@ -669,6 +965,49 @@ mod tests {
             SimplifyDecisionAction::RetainDiploidDiamond
         );
         assert!(decisions[0].removed_node.is_none());
+        assert!(g.adj.contains_key(&b));
+        assert!(g.adj.contains_key(&a));
+    }
+
+    #[test]
+    fn repeat_guardrail_retains_high_copy_diamond_branch() {
+        let k = 4usize;
+        let u = b"AAAA".to_vec();
+        let a = b"AAAT".to_vec();
+        let m = b"AATT".to_vec();
+        let b = b"AATA".to_vec();
+        let leaf = b"AAAC".to_vec();
+
+        let mut g = DbgGraph::new(k, {
+            let mut mm = BTreeMap::new();
+            mm.insert(u.clone(), 10);
+            mm.insert(a.clone(), 30);
+            mm.insert(m.clone(), 10);
+            mm.insert(b.clone(), 10);
+            mm.insert(leaf.clone(), 10);
+            mm
+        });
+
+        g.add_undirected_edge(&u, &a, 20).unwrap();
+        g.add_undirected_edge(&a, &m, 20).unwrap();
+        g.add_undirected_edge(&u, &b, 1).unwrap();
+        g.add_undirected_edge(&b, &m, 1).unwrap();
+        g.add_undirected_edge(&u, &leaf, 1).unwrap();
+
+        let p = SimplifyParams {
+            max_tip_bases: 8,
+            tip_max_multiplicity: 2,
+            max_bubble_vertices: 16,
+            max_bubble_internal_bases: 1000,
+        };
+        let (stats, decisions) = remove_diamond_bubbles_ext_with_decisions(&mut g, &p, None);
+
+        assert_eq!(stats.repeat_guarded_diamonds_retained, 1);
+        assert_eq!(stats.diamond_bubbles_resolved, 0);
+        assert_eq!(
+            decisions[0].action,
+            SimplifyDecisionAction::RetainRepeatGuardedDiamond
+        );
         assert!(g.adj.contains_key(&b));
         assert!(g.adj.contains_key(&a));
     }

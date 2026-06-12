@@ -81,11 +81,11 @@ This keeps Phase-2 experimentation from invalidating Phase-1 count semantics and
 - The edge between them must already exist in the DBG.
 - A successful bridge increments only that edge weight by 1.
 
-This is an adjacency-strength signal, not scaffolding and not distance-sensitive gap inference. The insert mean currently participates in mode identity and enables the bridge; richer insert-distribution bubble surgery is future work.
+This is an adjacency-strength signal, not primary FASTA mutation and not distance-sensitive gap inference. `scaffolds.json` may promote high-confidence dead-end endpoint joins into sidecar scaffold/path records only when support is unconflicted, the endpoint is not in a competing join cluster, and the distance confidence clears the documented promotion threshold. When accepted scaffold paths exist, Trex also writes a separate `scaffolds.fa` sequence sidecar using explicit `N` gaps for positive mate-estimated distances and known DBG overlap trimming for existing-edge joins; it never replaces `contigs.fa`. The insert mean currently participates in mode identity and enables the bridge; richer insert-distribution bubble surgery is future work.
 
 ### Diploid Simplification
 
-Phase-1 simplification removes low-coverage tips and resolves bounded diamond bubbles by branch support, using deterministic tie-breaks. Phase-2 mode preserves the same topology and sequence budgets, but `remove_diamond_bubbles_ext` skips collapsing branches whose support is equal or within 5% of the stronger branch. The intent is to preserve plausible heterozygous alternatives instead of forcing a haploid collapse too early.
+Phase-1 simplification removes low-coverage tips and resolves bounded diamond bubbles by branch support, using deterministic tie-breaks. The simplifier now runs through a SPAdes-inspired `spades_iterative_v1` scheduler that records pass order, before/after topology snapshots, graph-edit counts, and recompress/reannotation hook status in `simplification.json`; it does not yet add more aggressive cleanup. Repeat-aware guardrails retain diamonds with high-copy branch nodes before automatic collapse, recording `RetainRepeatGuardedDiamond` decisions in `simplification.json`. Phase-2 mode preserves the same topology and sequence budgets, but `remove_diamond_bubbles_ext` also skips collapsing branches whose support is equal or within 5% of the stronger branch. The intent is to preserve plausible heterozygous or repeat-derived alternatives instead of forcing a haploid collapse too early.
 
 The current motif set is intentionally narrow: bounded diamonds only. Complex repeats, long bubbles, tangles, cyclic walks, and distance-aware bubble surgery stay outside the shipped automatic simplifier.
 
@@ -105,8 +105,17 @@ This is a collapsed primary stream, not a phased pair of FASTA files. Haplotype-
 - Optional Phase-2 `L` records for unitig-to-unitig adjacency derived from simplified graph edges.
 - Primary `P` records named `ctgNNNNNN` when a contig vertex path can be represented as a full-unitig traversal.
 - Phase-2 mirror `P` records named `p2hNNNNNN` with `TS:Z:trex-unphased-hap-mirror` and `XX:Z:<ctg id>`.
+- Accepted scaffold sidecar `P` records named `scfNNNNNN` with `TS:Z:trex-scaffold-sidecar` and `GF:Z:scaffolds.fa`.
 
 `P` coverage is deliberately spec-safe rather than exhaustive. Strict subpaths of a unitig currently do not emit trimmed `P` rows; downstream consumers should treat the `S`/`L` graph plus current `P` rows as the inspectable diploid carrier, not as full phased haplotype walks.
+
+### Scaffold FASTA Sidecar
+
+`scaffolds.fa` is emitted only when accepted scaffold paths exist. It is a separate scaffolded sequence product, not the primary stream. Existing DBG-edge joins trim the documented overlap; promoted absent-edge joins insert explicit `N` gaps only when the mate-distance evidence estimates a positive gap. Negative or zero estimated gaps do not invent overlap sequence. The same accepted paths are projected into tagged GFA `P` rows named `scf...` for graph-aware consumers.
+
+### Promotion Policy
+
+`trex::illumina::promotion` is the policy seam between evidence and output-changing behavior. It currently owns endpoint-join promotion thresholds and rejection precedence before `trex::illumina::scaffold` builds `scaffolds.json`, `scaffolds.fa`, and tagged `scf...` GFA paths. This keeps tuning knobs such as minimum support, distance confidence, conflicting mate support, and competing endpoint clusters in one module instead of spreading them across path construction and export code.
 
 ## Checkpoints (operator-visible stages)
 
@@ -114,7 +123,7 @@ When `--checkpoint-root` is set, the pipeline may persist:
 
 - `preprocess/reads.jsonl` — preprocessed reads.
 - `counts/kmer_counts.json` — merged canonical *k*-mer counts for a given *k*.
-- `graph/simplified_dbg.json` — simplified **DBG** (after tip + diamond bubble rules), optional `graph/manifest.json` with SHA-256 when `--strict-checkpoints` is on at write time. Rewriting the graph checkpoint clears a stale `export/` tree.
+- `graph/simplified_dbg.json` — simplified **DBG** (after the scheduled tip + diamond bubble passes), optional `graph/manifest.json` with SHA-256 when `--strict-checkpoints` is on at write time. Rewriting the graph checkpoint clears a stale `export/` tree.
 - `export/sequences.json` — stitched **unitigs** and **contigs** (ASCII **ACGT**), optional `export/manifest.json` in strict mode. Unitig stitching walks canonical *k*-mers per unitig and picks the lexicographically smallest valid full sequence when multiple strand orientations are consistent with read-derived forward representatives (`dbg::unitig::stitch_sequence`). **GFA 1.0** export may include **`P`** lines mapping each **primary contig** to **unitig** `S` segments when the contig's vertex path is a concatenation of **full** unitig paths (greedy partition) or exactly matches one unitig path (forward/reverse); see `dbg::export::primary_contig_paths_for_gfa`. With **`--diploid`**, optional mirror **`P`** rows named `p2h000001`, … carry the same walk with **`TS:Z:trex-unphased-hap-mirror`** (unphased dual-path placeholder).
 - `preprocess/pair_layout.json` — when paired-end reads are ingested, records **`r1_count`** so resume can restore **Phase-2** mate-bridge identity alongside `reads.jsonl`.
 
@@ -122,7 +131,7 @@ With `--resume`, the graph stage reloads from `graph/simplified_dbg.json` when *
 
 ### Resume Identity
 
-Counts checkpoints are keyed by `k` and store merged counts before the trusted threshold is applied. This lets an operator change `T` and rebuild downstream stages without rereading raw inputs.
+Counts checkpoints are keyed by `k` and store merged counts before the trusted threshold is applied. This lets an operator change `T` and rebuild downstream stages without rereading raw inputs. In explicit multi-*k* or `--auto-k` mode, preprocess checkpoints stay at the requested root while selected-*k* counts, graph, and export checkpoints are written under `selected-k-<k>/` to prevent cross-*k* reuse on resume.
 
 Graph checkpoints are stricter. In addition to `k`, `GraphCheckpointIdentity` must match:
 
@@ -148,7 +157,7 @@ trex illumina assemble --r1 r1.fq --r2 r2.fq --kmer-size 31 --diploid --insert-m
 
 The optional TOML config accepts either flat assemble keys or an `[assemble]` table. CLI flags override config fields, config fields override built-in defaults, and `--no-resume` / `--no-strict-checkpoints` force those booleans off even if the config sets them.
 
-`--auto-k` derives a deterministic odd-*k* candidate ladder from the shortest retained read, scores it with the same selector used by `--kmer-ladder`, emits `multi_k.json`, and assembles only the selected graph. It does not merge candidate graphs.
+`--auto-k` derives a deterministic odd-*k* candidate ladder from the shortest retained read, scores it with the same selector used by `--kmer-ladder`, emits `multi_k.json`, and assembles only the selected graph. It does not merge candidate graphs. When checkpoints are enabled, selected graph artifacts are isolated under `selected-k-<k>/`.
 
 Built-in defaults that matter architecturally:
 
@@ -184,7 +193,10 @@ Shipped experimental Phase-2 Illumina functionality:
 - `trex illumina assemble --diploid` and `[assemble.diploid]`
 - graph checkpoint identity for diploid mode, paired input, insert prior fields, and mate-bridge version
 - mate-pair bridge on existing DBG edges only
+- conflict-aware endpoint join acceptance in `scaffolds.json` sidecar paths
+- separate `scaffolds.fa` sidecar from accepted scaffold paths
 - near-balanced diamond retention
+- repeat-aware diamond-retention guardrail
 - primary FASTA trusted *k*-mer multiplicity collapse
 - GFA 1.0 `XX:Z:trex-phase2-illumina` header tag
 - optional diploid `L` rows

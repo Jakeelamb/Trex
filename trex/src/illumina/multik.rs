@@ -8,7 +8,7 @@ use crate::illumina::counts::enumerate_sorted_counts;
 use crate::illumina::read::Read;
 use crate::kmer::apply_trusted_threshold;
 
-pub const MULTI_K_SELECTION_SCHEMA_VERSION: u64 = 1;
+pub const MULTI_K_SELECTION_SCHEMA_VERSION: u64 = 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct MultiKParams {
@@ -31,14 +31,45 @@ pub struct MultiKCandidateReport {
     pub trusted_kmers: usize,
     pub graph_nodes: usize,
     pub graph_edges: usize,
+    pub graph_density: f64,
     pub unitigs: usize,
+    pub max_unitig_nodes: usize,
+    pub unitig_n50_nodes: usize,
+    pub dead_end_nodes: usize,
     pub branch_nodes: usize,
+    pub tangle_nodes: usize,
     pub repeat_suspected_nodes: usize,
     pub read_kmer_completeness: f64,
     pub contiguity_score: f64,
     pub branchiness_score: f64,
+    pub dead_end_score: f64,
+    pub tangle_score: f64,
     pub repeat_risk_score: f64,
+    pub graph_density_score: f64,
+    pub score_terms: MultiKScoreTerms,
     pub total_score: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MultiKScoreTerms {
+    pub read_kmer_completeness: f64,
+    pub contiguity: f64,
+    pub branchiness_penalty: f64,
+    pub dead_end_penalty: f64,
+    pub tangle_penalty: f64,
+    pub repeat_risk_penalty: f64,
+    pub graph_density_penalty: f64,
+}
+
+impl MultiKScoreTerms {
+    fn total(self) -> f64 {
+        self.read_kmer_completeness + self.contiguity
+            - self.branchiness_penalty
+            - self.dead_end_penalty
+            - self.tangle_penalty
+            - self.repeat_risk_penalty
+            - self.graph_density_penalty
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,9 +163,7 @@ pub fn auto_ladder_for_shortest_read(shortest: usize) -> Vec<usize> {
         &[21, 33, 55, 77, 99, 127]
     };
     let mut out: Vec<usize> = candidates.iter().copied().filter(|k| *k <= max_k).collect();
-    if out.is_empty() {
-        out.push(max_k);
-    } else if !out.contains(&max_k) && max_k >= 21 {
+    if out.is_empty() || (!out.contains(&max_k) && max_k >= 21) {
         out.push(max_k);
     }
     out.sort_unstable();
@@ -181,23 +210,45 @@ fn score_candidate(
         .map(|neighbors| neighbors.len())
         .sum::<usize>()
         / 2;
+    let graph_nodes = graph.node_mul.len();
+    let graph_density = fraction(graph_edges, graph_nodes);
+    let dead_end_nodes = graph
+        .node_mul
+        .keys()
+        .filter(|node| graph.degree(node) <= 1)
+        .count();
     let branch_nodes = graph
-        .adj
+        .node_mul
         .keys()
         .filter(|node| graph.degree(node) > 2)
         .count();
+    let tangle_nodes = graph
+        .node_mul
+        .keys()
+        .filter(|node| graph.degree(node) > 3)
+        .count();
     let max_unitig_nodes = unitig_paths.iter().map(Vec::len).max().unwrap_or(0);
+    let unitig_n50_nodes = n50_unitig_nodes(&unitig_paths);
     let read_kmer_completeness = fraction(trusted.len(), unique_kmers);
     let contiguity_score = max_unitig_nodes as f64;
-    let branchiness_score = fraction(branch_nodes, graph.node_mul.len());
+    let branchiness_score = fraction(branch_nodes, graph_nodes);
+    let dead_end_score = fraction(dead_end_nodes, graph_nodes);
+    let tangle_score = fraction(tangle_nodes, graph_nodes);
     let repeat_risk_score = fraction(
         annotations.summary.repeat_suspected_nodes,
         annotations.summary.node_count,
     );
-    let total_score = read_kmer_completeness.mul_add(
-        1000.0,
-        contiguity_score - branchiness_score * 100.0 - repeat_risk_score * 50.0,
-    );
+    let graph_density_score = (graph_density - 1.25).max(0.0);
+    let score_terms = MultiKScoreTerms {
+        read_kmer_completeness: read_kmer_completeness * 1000.0,
+        contiguity: contiguity_score,
+        branchiness_penalty: branchiness_score * 100.0,
+        dead_end_penalty: dead_end_score * 50.0,
+        tangle_penalty: tangle_score * 150.0,
+        repeat_risk_penalty: repeat_risk_score * 50.0,
+        graph_density_penalty: graph_density_score * 25.0,
+    };
+    let total_score = score_terms.total();
 
     Ok(MultiKCandidateReport {
         k,
@@ -205,15 +256,24 @@ fn score_candidate(
         reason: None,
         unique_kmers,
         trusted_kmers: trusted.len(),
-        graph_nodes: graph.node_mul.len(),
+        graph_nodes,
         graph_edges,
+        graph_density,
         unitigs: unitig_paths.len(),
+        max_unitig_nodes,
+        unitig_n50_nodes,
+        dead_end_nodes,
         branch_nodes,
+        tangle_nodes,
         repeat_suspected_nodes: annotations.summary.repeat_suspected_nodes,
         read_kmer_completeness,
         contiguity_score,
         branchiness_score,
+        dead_end_score,
+        tangle_score,
         repeat_risk_score,
+        graph_density_score,
+        score_terms,
         total_score,
     })
 }
@@ -227,15 +287,54 @@ fn infeasible_candidate(k: usize, reason: String) -> MultiKCandidateReport {
         trusted_kmers: 0,
         graph_nodes: 0,
         graph_edges: 0,
+        graph_density: 0.0,
         unitigs: 0,
+        max_unitig_nodes: 0,
+        unitig_n50_nodes: 0,
+        dead_end_nodes: 0,
         branch_nodes: 0,
+        tangle_nodes: 0,
         repeat_suspected_nodes: 0,
         read_kmer_completeness: 0.0,
         contiguity_score: 0.0,
         branchiness_score: 1.0,
+        dead_end_score: 1.0,
+        tangle_score: 1.0,
         repeat_risk_score: 1.0,
+        graph_density_score: 1.0,
+        score_terms: MultiKScoreTerms {
+            read_kmer_completeness: 0.0,
+            contiguity: 0.0,
+            branchiness_penalty: 100.0,
+            dead_end_penalty: 50.0,
+            tangle_penalty: 150.0,
+            repeat_risk_penalty: 50.0,
+            graph_density_penalty: 25.0,
+        },
         total_score: f64::NEG_INFINITY,
     }
+}
+
+fn n50_unitig_nodes(unitig_paths: &[Vec<Vec<u8>>]) -> usize {
+    let mut lengths: Vec<usize> = unitig_paths
+        .iter()
+        .map(Vec::len)
+        .filter(|len| *len > 0)
+        .collect();
+    if lengths.is_empty() {
+        return 0;
+    }
+    let total: usize = lengths.iter().sum();
+    let midpoint = total.div_ceil(2);
+    lengths.sort_unstable_by(|a, b| b.cmp(a));
+    let mut running = 0usize;
+    for len in lengths {
+        running += len;
+        if running >= midpoint {
+            return len;
+        }
+    }
+    0
 }
 
 fn better_candidate(candidate: &MultiKCandidateReport, previous: &MultiKCandidateReport) -> bool {
@@ -326,6 +425,43 @@ mod tests {
     }
 
     #[test]
+    fn candidate_report_includes_spades_style_graph_pressure_terms() {
+        let reads = vec![Read {
+            id: "r1".to_string(),
+            sequence: b"ACGTACGTACGT".to_vec(),
+        }];
+        let report = select_k(
+            &reads,
+            4,
+            1,
+            &MultiKParams {
+                auto: false,
+                ladder: vec![4],
+            },
+        )
+        .expect("select");
+
+        let candidate = &report.candidates[0];
+        assert!(candidate.feasible);
+        assert!(candidate.graph_density > 0.0);
+        assert_eq!(candidate.max_unitig_nodes, candidate.unitig_n50_nodes);
+        assert!(candidate.dead_end_nodes > 0);
+        assert_eq!(
+            candidate.dead_end_score,
+            candidate.dead_end_nodes as f64 / candidate.graph_nodes as f64
+        );
+        assert_eq!(
+            candidate.total_score,
+            candidate.score_terms.read_kmer_completeness + candidate.score_terms.contiguity
+                - candidate.score_terms.branchiness_penalty
+                - candidate.score_terms.dead_end_penalty
+                - candidate.score_terms.tangle_penalty
+                - candidate.score_terms.repeat_risk_penalty
+                - candidate.score_terms.graph_density_penalty
+        );
+    }
+
+    #[test]
     fn ladder_records_infeasible_candidates() {
         let reads = vec![Read {
             id: "r1".to_string(),
@@ -350,6 +486,8 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("exceeds shortest"));
+        assert!(report.candidates[1].score_terms.dead_end_penalty > 0.0);
+        assert!(report.candidates[1].score_terms.tangle_penalty > 0.0);
     }
 
     #[test]

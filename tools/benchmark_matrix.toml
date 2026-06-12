@@ -496,6 +496,8 @@ notes = "First Tier-3 governed row. The prepared 5k-pair source is a WGS prefix 
 tiers = ["manual"]
 out_dir = "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex"
 reference = "data/benchmarks/hg002_giab_grch38_chr20/reference.fa"
+confident_regions_bed = "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.benchmark.bed"
+variant_vcf = "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz"
 args = [
   "illumina",
   "assemble",
@@ -551,6 +553,8 @@ notes = "First interval-filtered Tier-3 row. This replaces raw WGS-prefix eviden
 tiers = ["manual"]
 out_dir = "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex"
 reference = "data/benchmarks/hg002_giab_grch38_chr20/reference.chr20_10000000_10010000.fa"
+confident_regions_bed = "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.benchmark.bed"
+variant_vcf = "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz"
 args = [
   "illumina",
   "assemble",

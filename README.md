@@ -6,7 +6,7 @@ Rust genome assembler focused on the **Phase-2 Illumina endgame**, with Phase-1 
 
 | Path | Role |
 |------|------|
-| [`trex/`](trex/) | Sync **`trex`** library: FASTQ/FASTA ingest (+ gzip), preprocess, canonical *k*-mer counts (parallel sort by default), DBG build + tip/diamond bubble simplification, unitigs/contigs, GFA 1.0 + FASTA export, checkpoints |
+| [`trex/`](trex/) | Sync **`trex`** library: FASTQ/FASTA ingest (+ gzip), preprocess, canonical *k*-mer counts (parallel sort by default), read-trust diagnostics, DBG build + tip/diamond bubble simplification, unitigs/contigs, GFA 1.0 + FASTA export, checkpoints |
 | [`trex-cli/`](trex-cli/) | Async **`trex-cli`** (`trex` binary): Tokio + `spawn_blocking` into the library |
 | [`xtask/`](xtask/) | Rust repository automation: matrix/capability/data validators, PR gate, read/data fetchers, and benchmark artifact runner |
 | [`fixtures/`](fixtures/) | Phase-1 smoke (`tiny.fq`, `tiny_ref.fa`, `expected/ref_free_smoke/`), **Phase-2 Illumina** synthetic two-parent [`phase2_synthetic/`](fixtures/phase2_synthetic/), and real-reference PhiX174 [`phix174/`](fixtures/phix174/) |
@@ -17,6 +17,7 @@ Rust genome assembler focused on the **Phase-2 Illumina endgame**, with Phase-1 
 | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) | Operator capability matrix: CLI flags, outputs, checkpoints, CI tiers, scripts, and deferred work |
 | [`docs/ASSEMBLER_FRAMEWORK.md`](docs/ASSEMBLER_FRAMEWORK.md) | Literature-informed module framework for evidence, graph IR, simplification, paths/scaffolds, quality, and deferred graph adapters |
 | [`docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md`](docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md) | Target Illumina assembler architecture, promotion policy, data flow, unit-test map, and wave implementation plan |
+| [`docs/MODULE_MAP.md`](docs/MODULE_MAP.md) | Live assembler module inventory for tuning, optimization, memory pressure, and code-size cleanup |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Orchestrator/worker protocol, claim levels, acceptance checklist, and commit discipline |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Active lane ledger for quality gates, evidence, graph IR, simplification, paths/scaffolds, benchmark matrix, and future adapters |
 | [`docs/PROFILING.md`](docs/PROFILING.md) | Measured profiling baselines, hot symbols, and biological-row blockers |
@@ -41,9 +42,9 @@ Paired-end:
 cargo run -p trex-cli -- illumina assemble --r1 r1.fq --r2 r2.fq --kmer-size 31 -T 2 --out-dir ./run1
 ```
 
-Outputs default to `unitigs.fa`, `contigs.fa`, `graph.gfa`, typed `evidence.json`, copy-number/repeat `annotations.json`, decision-first `simplification.json`, evidence-backed `scaffolds.json`, contig endpoint `fragmentation.json`, post-assembly audit reports `audit.json` / `audit.tsv`, and diploid evidence `diploid.json` under `--out-dir` (override FASTA/GFA paths with `--unitigs-fasta`, `--contigs-fasta`, `--gfa`). Explicit multi-*k* mode also writes `multi_k.json`. Use **`-`** as the path for any of the FASTA/GFA outputs to write to **stdout** (Phase-1 export sentinel).
+Outputs default to `unitigs.fa`, `contigs.fa`, `graph.gfa`, typed `evidence.json`, report-only read trust `trust.json`, copy-number/repeat `annotations.json`, decision-first `simplification.json` with scheduled pass/topology metadata, evidence-backed `scaffolds.json`, optional scaffolded sequence sidecar `scaffolds.fa`, contig endpoint `fragmentation.json`, post-assembly audit reports `audit.json` / `audit.tsv`, and diploid evidence `diploid.json` under `--out-dir` (override primary FASTA/GFA paths with `--unitigs-fasta`, `--contigs-fasta`, `--gfa`). Explicit multi-*k* mode also writes `multi_k.json`. Use **`-`** as the path for any of the primary FASTA/GFA outputs to write to **stdout** (Phase-1 export sentinel).
 
-Explicit multi-*k* graph selection is opt-in with `--kmer-ladder 21,31,41` or TOML `k_ladder = [21, 31, 41]`. Trex builds and scores candidate graphs independently, selects one graph for the normal FASTA/GFA path, and records the candidate scores in `multi_k.json`. The default remains one-*k*; multi-*k* currently rejects `--checkpoint-root`.
+Explicit multi-*k* graph selection is opt-in with `--kmer-ladder 21,31,41` or TOML `k_ladder = [21, 31, 41]`. Trex builds and scores candidate graphs independently, selects one graph for the normal FASTA/GFA path, and records candidate completeness, contiguity, dead-end, branch/tangle, repeat-risk, graph-density, and weighted score terms in `multi_k.json`. The default remains one-*k*; with `--checkpoint-root`, multi-*k* stores counts, graph, and export checkpoints under a selected-*k* namespace so resume cannot reuse artifacts from a different chosen graph.
 
 Simplification overrides (defaults scale with *k* unless set): `--max-tip-bases`, `--tip-max-multiplicity`, `--max-bubble-vertices`, `--max-bubble-internal-bases`, or TOML `[assemble.simplify]` with the same keys.
 
@@ -79,7 +80,7 @@ cargo run -p xtask -- bench --tier manual --row drosophila_illumina_pe_1m_benchm
 
 `phase2_illumina_benchmark_gate.sh` runs **`benchmark_gate.sh`** first, then the synthetic **two-parent** diploid reference layer, graph summaries, haplotype metrics, and optional **QUAST** when `TREX_RUN_QUAST=1` (per **Phase-2 Illumina benchmark gate** in [`CONTEXT.md`](CONTEXT.md)). CI runs the full script on **`main`/`master`**, **tags**, **schedule**, and **workflow_dispatch**; pull requests run [`pr_smoke.sh`](scripts/pr_smoke.sh) without mandatory **minimap2** (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-`xtask bench --tier nightly` includes the governed PhiX174 real-reference micro row. It builds `trex-cli` in release mode, runs `trex illumina assemble` on deterministic PhiX reads, and records wall time, max RSS, observed Trex counters, FASTA/GFA artifact sizes, assembly-size metrics, typed evidence, graph annotation, simplification-decision, scaffold, multi-*k*, post-assembly audit, and diploid parent-evidence summaries when present, read-vs-assembly *k*-mer quality, and reference *k*-mer quality metrics in JSON when the row declares a reference.
+`xtask bench --tier nightly` includes the governed PhiX174 real-reference micro row. It builds `trex-cli` in release mode, runs `trex illumina assemble` on deterministic PhiX reads, and records wall time, max RSS, observed Trex counters, FASTA/GFA artifact sizes, assembly-size metrics, typed evidence, graph annotation, simplification-decision, scaffold, multi-*k*, post-assembly audit, and diploid parent-evidence summaries when present, read-vs-assembly *k*-mer quality, reference *k*-mer quality metrics, and GIAB-style confident-region / variant truth summaries when the row declares BED/VCF truth files.
 
 `trex illumina assemble --auto-k` derives a deterministic odd-*k* ladder from the shortest retained read, scores candidates with the same multi-*k* selector used by `--kmer-ladder`, writes `multi_k.json`, and logs the selected *k*. Use explicit `--kmer-size` for fixed-*k* reproducibility and `--kmer-ladder` when a benchmark needs a hand-curated candidate set.
 

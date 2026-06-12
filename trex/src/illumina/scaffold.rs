@@ -6,8 +6,10 @@ use crate::illumina::fragmentation::{
     FragmentEndpointReport, FragmentStopReason, FragmentationReport,
 };
 use crate::illumina::mate::{MateBridgeCandidate, MateDistanceEvidence, MatePairOrientation};
+use crate::illumina::promotion::{EndpointJoinPromotionPolicy, PromotionPolicySnapshot};
+use crate::kmer::reverse_complement;
 
-pub const SCAFFOLD_ARTIFACT_SCHEMA_VERSION: u64 = 3;
+pub const SCAFFOLD_ARTIFACT_SCHEMA_VERSION: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScaffoldStep {
@@ -49,14 +51,19 @@ pub struct EndpointJoinCandidate {
     pub distance: Option<MateDistanceEvidence>,
     pub support_pairs: usize,
     pub conflict_pairs: usize,
+    pub conflict_cluster_size: usize,
     pub score: u64,
     pub existing_dbg_edge: bool,
+    pub promotion_stage: String,
+    pub accepted: bool,
+    pub rejection_reason: Option<String>,
     pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScaffoldArtifact {
     pub schema_version: u64,
+    pub promotion_policy: PromotionPolicySnapshot,
     pub bridge_candidates: Vec<MateBridgeCandidate>,
     pub endpoint_join_candidates: Vec<EndpointJoinCandidate>,
     pub paths: Vec<ScaffoldPath>,
@@ -66,11 +73,99 @@ impl ScaffoldArtifact {
     pub fn empty() -> Self {
         Self {
             schema_version: SCAFFOLD_ARTIFACT_SCHEMA_VERSION,
+            promotion_policy: PromotionPolicySnapshot::default(),
             bridge_candidates: Vec::new(),
             endpoint_join_candidates: Vec::new(),
             paths: Vec::new(),
         }
     }
+}
+
+pub fn scaffold_fasta_records(
+    artifact: &ScaffoldArtifact,
+    unitig_records: &[(String, Vec<u8>)],
+) -> Vec<(String, Vec<u8>)> {
+    artifact
+        .paths
+        .iter()
+        .filter_map(|path| {
+            scaffold_path_sequence(path, unitig_records).map(|seq| (path.id.clone(), seq))
+        })
+        .collect()
+}
+
+pub fn scaffold_gfa_paths(artifact: &ScaffoldArtifact) -> Vec<(String, Vec<(usize, char)>)> {
+    artifact
+        .paths
+        .iter()
+        .filter_map(|path| {
+            let mut steps = Vec::with_capacity(path.steps.len());
+            for step in &path.steps {
+                let idx = parse_utg_segment(&step.segment)?;
+                if !matches!(step.orient, '+' | '-') {
+                    return None;
+                }
+                steps.push((idx + 1, step.orient));
+            }
+            (!steps.is_empty()).then_some((path.id.clone(), steps))
+        })
+        .collect()
+}
+
+fn scaffold_path_sequence(
+    path: &ScaffoldPath,
+    unitig_records: &[(String, Vec<u8>)],
+) -> Option<Vec<u8>> {
+    let first = path.steps.first()?;
+    let mut seq = oriented_segment_sequence(first, unitig_records)?;
+    for idx in 1..path.steps.len() {
+        let step = &path.steps[idx];
+        let link = path.links.get(idx - 1)?;
+        let mut next = oriented_segment_sequence(step, unitig_records)?;
+        if link.source == "mate_bridge_existing_edge" {
+            let overlap = overlap_cigar_bases(&link.overlap_cigar);
+            if overlap < next.len() {
+                next = next[overlap..].to_vec();
+            } else {
+                next.clear();
+            }
+        } else if let Some(gap) = positive_gap_len(link) {
+            seq.extend(std::iter::repeat(b'N').take(gap));
+        }
+        seq.extend(next);
+    }
+    Some(seq)
+}
+
+fn oriented_segment_sequence(
+    step: &ScaffoldStep,
+    unitig_records: &[(String, Vec<u8>)],
+) -> Option<Vec<u8>> {
+    let idx = parse_utg_segment(&step.segment)?;
+    let seq = unitig_records.get(idx)?.1.clone();
+    match step.orient {
+        '+' => Some(seq),
+        '-' => Some(reverse_complement(&seq)),
+        _ => None,
+    }
+}
+
+fn parse_utg_segment(segment: &str) -> Option<usize> {
+    let suffix = segment.strip_prefix("utg")?;
+    let one_based = suffix.parse::<usize>().ok()?;
+    one_based.checked_sub(1)
+}
+
+fn positive_gap_len(link: &ScaffoldLink) -> Option<usize> {
+    let gap = link.distance.as_ref()?.estimated_gap_bp;
+    (gap > 0).then_some(gap as usize)
+}
+
+fn overlap_cigar_bases(cigar: &str) -> usize {
+    cigar
+        .strip_suffix('M')
+        .and_then(|digits| digits.parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 pub fn build_scaffold_artifact(
@@ -82,11 +177,19 @@ pub fn build_scaffold_artifact(
     let mut paths = Vec::new();
     let overlap_cigar = format!("{}M", k.saturating_sub(1));
 
+    let promotion_policy = PromotionPolicySnapshot::default();
+    let endpoint_join_candidates =
+        ranked_endpoint_joins(candidates, fragmentation, &promotion_policy.endpoint_join);
     for candidate in candidates {
-        if !candidate.existing_dbg_edge {
+        let accepted_join = accepted_endpoint_join(&endpoint_join_candidates, candidate);
+        if !candidate.existing_dbg_edge && accepted_join.is_none() {
             continue;
         }
-        let Some((from_idx, to_idx)) = candidate_unitig_tail_head(candidate, unitig_paths) else {
+        let Some((from_idx, from_orient, to_idx, to_orient)) = (if candidate.existing_dbg_edge {
+            candidate_unitig_tail_head(candidate, unitig_paths)
+        } else {
+            accepted_join.and_then(|join| candidate_unitig_endpoint_steps(join, unitig_paths))
+        }) else {
             continue;
         };
         if from_idx == to_idx {
@@ -100,31 +203,36 @@ pub fn build_scaffold_artifact(
             steps: vec![
                 ScaffoldStep {
                     segment: from_segment.clone(),
-                    orient: '+',
+                    orient: from_orient,
                 },
                 ScaffoldStep {
                     segment: to_segment.clone(),
-                    orient: '+',
+                    orient: to_orient,
                 },
             ],
             links: vec![ScaffoldLink {
                 from_segment,
-                from_orient: '+',
+                from_orient,
                 to_segment,
-                to_orient: '+',
+                to_orient,
                 orientation: candidate.orientation,
                 distance: candidate.distance.clone(),
                 overlap_cigar: overlap_cigar.clone(),
                 support_pairs: candidate.support_pairs,
                 conflict_pairs: candidate.conflict_pairs,
-                source: "mate_bridge_existing_edge".to_string(),
+                source: if candidate.existing_dbg_edge {
+                    "mate_bridge_existing_edge"
+                } else {
+                    "mate_pair_endpoint_join_promoted_sidecar"
+                }
+                .to_string(),
             }],
         });
     }
-    let endpoint_join_candidates = ranked_endpoint_joins(candidates, fragmentation);
 
     ScaffoldArtifact {
         schema_version: SCAFFOLD_ARTIFACT_SCHEMA_VERSION,
+        promotion_policy,
         bridge_candidates: candidates.to_vec(),
         endpoint_join_candidates,
         paths,
@@ -134,7 +242,19 @@ pub fn build_scaffold_artifact(
 fn ranked_endpoint_joins(
     candidates: &[MateBridgeCandidate],
     fragmentation: &FragmentationReport,
+    policy: &EndpointJoinPromotionPolicy,
 ) -> Vec<EndpointJoinCandidate> {
+    let mut endpoint_use: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for candidate in candidates {
+        if candidate.existing_dbg_edge {
+            continue;
+        }
+        *endpoint_use
+            .entry(candidate.from_node.as_str())
+            .or_insert(0) += 1;
+        *endpoint_use.entry(candidate.to_node.as_str()).or_insert(0) += 1;
+    }
     let mut joins: Vec<EndpointJoinCandidate> = candidates
         .iter()
         .filter_map(|candidate| {
@@ -143,6 +263,24 @@ fn ranked_endpoint_joins(
             if from.contig == to.contig {
                 return None;
             }
+            let conflict_cluster_size = if candidate.existing_dbg_edge {
+                0
+            } else {
+                endpoint_use
+                    .get(candidate.from_node.as_str())
+                    .copied()
+                    .unwrap_or(0)
+                    .max(
+                        endpoint_use
+                            .get(candidate.to_node.as_str())
+                            .copied()
+                            .unwrap_or(0),
+                    )
+            };
+            let decision = policy.evaluate(candidate, conflict_cluster_size);
+            let accepted = decision.accepted;
+            let promotion_stage = decision.target_stage.as_str().to_string();
+            let rejection_reason = decision.rejection_reason.map(str::to_string);
             Some(EndpointJoinCandidate {
                 id: String::new(),
                 from_contig: from.contig.clone(),
@@ -155,12 +293,18 @@ fn ranked_endpoint_joins(
                 distance: candidate.distance.clone(),
                 support_pairs: candidate.support_pairs,
                 conflict_pairs: candidate.conflict_pairs,
+                conflict_cluster_size,
                 score: candidate.score,
                 existing_dbg_edge: candidate.existing_dbg_edge,
+                promotion_stage,
+                accepted,
+                rejection_reason,
                 source: if candidate.existing_dbg_edge {
                     "mate_bridge_existing_edge"
+                } else if accepted {
+                    "mate_pair_endpoint_join_promoted_sidecar"
                 } else {
-                    "mate_pair_endpoint_join_report_only"
+                    "mate_pair_endpoint_join_rejected"
                 }
                 .to_string(),
             })
@@ -183,6 +327,19 @@ fn ranked_endpoint_joins(
     joins
 }
 
+fn accepted_endpoint_join<'a>(
+    joins: &'a [EndpointJoinCandidate],
+    candidate: &MateBridgeCandidate,
+) -> Option<&'a EndpointJoinCandidate> {
+    joins.iter().find(|join| {
+        join.accepted
+            && !join.existing_dbg_edge
+            && join.from_node == candidate.from_node
+            && join.to_node == candidate.to_node
+            && join.orientation == candidate.orientation
+    })
+}
+
 fn dead_end_endpoint_for_node<'a>(
     fragmentation: &'a FragmentationReport,
     node: &str,
@@ -196,31 +353,55 @@ fn dead_end_endpoint_for_node<'a>(
 fn candidate_unitig_tail_head(
     candidate: &MateBridgeCandidate,
     unitig_paths: &[Vec<Vec<u8>>],
-) -> Option<(usize, usize)> {
+) -> Option<(usize, char, usize, char)> {
     let mut from_idx = None;
     let mut to_idx = None;
     for (idx, path) in unitig_paths.iter().enumerate() {
-        if path
-            .last()
-            .map(|node| String::from_utf8_lossy(node) == candidate.from_node)
-            .unwrap_or(false)
-        {
+        if endpoint_node_matches(path.last(), &candidate.from_node) {
             from_idx = Some(idx);
         }
-        if path
-            .first()
-            .map(|node| String::from_utf8_lossy(node) == candidate.to_node)
-            .unwrap_or(false)
-        {
+        if endpoint_node_matches(path.first(), &candidate.to_node) {
             to_idx = Some(idx);
         }
     }
-    Some((from_idx?, to_idx?))
+    Some((from_idx?, '+', to_idx?, '+'))
+}
+
+fn candidate_unitig_endpoint_steps(
+    join: &EndpointJoinCandidate,
+    unitig_paths: &[Vec<Vec<u8>>],
+) -> Option<(usize, char, usize, char)> {
+    let mut from_step = None;
+    let mut to_step = None;
+    for (idx, path) in unitig_paths.iter().enumerate() {
+        let first = path.first();
+        let last = path.last();
+        if join.from_side == "left" && endpoint_node_matches(first, &join.from_node) {
+            from_step = Some((idx, '-'));
+        }
+        if join.from_side == "right" && endpoint_node_matches(last, &join.from_node) {
+            from_step = Some((idx, '+'));
+        }
+        if join.to_side == "left" && endpoint_node_matches(first, &join.to_node) {
+            to_step = Some((idx, '+'));
+        }
+        if join.to_side == "right" && endpoint_node_matches(last, &join.to_node) {
+            to_step = Some((idx, '-'));
+        }
+    }
+    let (from_idx, from_orient) = from_step?;
+    let (to_idx, to_orient) = to_step?;
+    Some((from_idx, from_orient, to_idx, to_orient))
+}
+
+fn endpoint_node_matches(node: Option<&Vec<u8>>, expected: &str) -> bool {
+    node.map(|node| node.as_slice() == expected.as_bytes())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_scaffold_artifact;
+    use super::{build_scaffold_artifact, scaffold_fasta_records, scaffold_gfa_paths};
     use crate::illumina::fragmentation::{
         FragmentEndpointReport, FragmentStopReason, FragmentationReport, FragmentationSummary,
         FRAGMENTATION_REPORT_SCHEMA_VERSION,
@@ -262,6 +443,16 @@ mod tests {
         support_pairs: usize,
         existing_dbg_edge: bool,
     ) -> MateBridgeCandidate {
+        candidate_with_conflicts(from_node, to_node, support_pairs, 0, existing_dbg_edge)
+    }
+
+    fn candidate_with_conflicts(
+        from_node: &str,
+        to_node: &str,
+        support_pairs: usize,
+        conflict_pairs: usize,
+        existing_dbg_edge: bool,
+    ) -> MateBridgeCandidate {
         let distance = Some(MateDistanceEvidence {
             insert_mean_bp: 10,
             insert_stddev_bp: Some(2),
@@ -275,7 +466,7 @@ mod tests {
             orientation: MatePairOrientation::R1TailToR2Head,
             distance,
             support_pairs,
-            conflict_pairs: 0,
+            conflict_pairs,
             score: (support_pairs as u64) * 100 + 80,
             existing_dbg_edge,
         }
@@ -353,9 +544,22 @@ mod tests {
         assert_eq!(artifact.bridge_candidates.len(), 1);
         assert_eq!(artifact.endpoint_join_candidates.len(), 1);
         assert_eq!(artifact.endpoint_join_candidates[0].id, "ejc000001");
+        assert!(artifact.endpoint_join_candidates[0].accepted);
+        assert_eq!(
+            artifact.endpoint_join_candidates[0].promotion_stage,
+            "scaffold_artifact"
+        );
+        assert_eq!(artifact.promotion_policy.endpoint_join.min_support_pairs, 2);
+        assert_eq!(
+            artifact
+                .promotion_policy
+                .endpoint_join
+                .min_distance_confidence,
+            50
+        );
         assert_eq!(
             artifact.endpoint_join_candidates[0].source,
-            "mate_pair_endpoint_join_report_only"
+            "mate_pair_endpoint_join_promoted_sidecar"
         );
         assert_eq!(
             artifact.endpoint_join_candidates[0].orientation,
@@ -368,6 +572,123 @@ mod tests {
                 .map(|distance| distance.confidence),
             Some(80)
         );
+        assert_eq!(artifact.paths.len(), 1);
+        assert_eq!(
+            artifact.paths[0].links[0].source,
+            "mate_pair_endpoint_join_promoted_sidecar"
+        );
+    }
+
+    #[test]
+    fn rejects_endpoint_join_conflict_clusters_before_path_promotion() {
+        let candidates = vec![
+            candidate("AAC", "ACC", 5, false),
+            candidate("AAC", "CCC", 4, false),
+            candidate_with_conflicts("GGG", "TTT", 5, 1, false),
+        ];
+        let unitigs = vec![
+            vec![b"AAA".to_vec(), b"AAC".to_vec()],
+            vec![b"ACC".to_vec(), b"CCC".to_vec()],
+            vec![b"GGG".to_vec()],
+            vec![b"TTT".to_vec()],
+        ];
+        let frag = fragmentation(vec![
+            endpoint("ctg1", "right", "AAC"),
+            endpoint("ctg2", "left", "ACC"),
+            endpoint("ctg3", "left", "CCC"),
+            endpoint("ctg4", "right", "GGG"),
+            endpoint("ctg5", "left", "TTT"),
+        ]);
+
+        let artifact = build_scaffold_artifact(&candidates, &unitigs, 3, &frag);
+
+        assert_eq!(artifact.endpoint_join_candidates.len(), 3);
+        assert!(artifact
+            .endpoint_join_candidates
+            .iter()
+            .all(|candidate| !candidate.accepted));
+        assert!(artifact
+            .endpoint_join_candidates
+            .iter()
+            .all(|candidate| candidate.promotion_stage == "report_only_candidate"));
+        assert!(artifact
+            .endpoint_join_candidates
+            .iter()
+            .any(|candidate| candidate.rejection_reason.as_deref()
+                == Some("endpoint participates in a competing join cluster")));
+        assert!(artifact
+            .endpoint_join_candidates
+            .iter()
+            .any(|candidate| candidate.rejection_reason.as_deref()
+                == Some("candidate has conflicting mate-pair support")));
         assert!(artifact.paths.is_empty());
+    }
+
+    #[test]
+    fn scaffold_fasta_trims_existing_dbg_overlap() {
+        let candidates = vec![candidate("AAC", "ACC", 3, true)];
+        let unitig_paths = vec![
+            vec![b"AAA".to_vec(), b"AAC".to_vec()],
+            vec![b"ACC".to_vec(), b"CCC".to_vec()],
+        ];
+        let unitig_records = vec![
+            ("utg000001".to_string(), b"AAAC".to_vec()),
+            ("utg000002".to_string(), b"ACCC".to_vec()),
+        ];
+        let frag = fragmentation(vec![
+            endpoint("ctg1", "right", "AAC"),
+            endpoint("ctg2", "left", "ACC"),
+        ]);
+        let artifact = build_scaffold_artifact(&candidates, &unitig_paths, 3, &frag);
+
+        let records = scaffold_fasta_records(&artifact, &unitig_records);
+
+        assert_eq!(records, vec![("scf000001".to_string(), b"AAACCC".to_vec())]);
+    }
+
+    #[test]
+    fn scaffold_fasta_uses_explicit_n_gap_for_promoted_endpoint_join() {
+        let candidates = vec![candidate("AAC", "ACC", 5, false)];
+        let unitig_paths = vec![
+            vec![b"AAA".to_vec(), b"AAC".to_vec()],
+            vec![b"ACC".to_vec(), b"CCC".to_vec()],
+        ];
+        let unitig_records = vec![
+            ("utg000001".to_string(), b"AAAC".to_vec()),
+            ("utg000002".to_string(), b"ACCC".to_vec()),
+        ];
+        let frag = fragmentation(vec![
+            endpoint("ctg1", "right", "AAC"),
+            endpoint("ctg2", "left", "ACC"),
+        ]);
+        let artifact = build_scaffold_artifact(&candidates, &unitig_paths, 3, &frag);
+
+        let records = scaffold_fasta_records(&artifact, &unitig_records);
+
+        assert_eq!(
+            records,
+            vec![("scf000001".to_string(), b"AAACNNNNACCC".to_vec())]
+        );
+    }
+
+    #[test]
+    fn scaffold_gfa_paths_preserve_accepted_scaffold_steps() {
+        let candidates = vec![candidate("AAC", "ACC", 5, false)];
+        let unitig_paths = vec![
+            vec![b"AAA".to_vec(), b"AAC".to_vec()],
+            vec![b"ACC".to_vec(), b"CCC".to_vec()],
+        ];
+        let frag = fragmentation(vec![
+            endpoint("ctg1", "right", "AAC"),
+            endpoint("ctg2", "left", "ACC"),
+        ]);
+        let artifact = build_scaffold_artifact(&candidates, &unitig_paths, 3, &frag);
+
+        let paths = scaffold_gfa_paths(&artifact);
+
+        assert_eq!(
+            paths,
+            vec![("scf000001".to_string(), vec![(1, '+'), (2, '+')])]
+        );
     }
 }

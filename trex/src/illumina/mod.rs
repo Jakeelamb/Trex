@@ -14,8 +14,10 @@ pub mod paired;
 pub mod phase2_primary;
 pub mod pipeline;
 pub mod preprocess;
+pub mod promotion;
 pub mod read;
 pub mod scaffold;
+pub mod trust;
 
 pub use checkpoint::{CheckpointRoot, GraphCheckpointIdentity};
 pub use pipeline::{
