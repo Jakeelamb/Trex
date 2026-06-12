@@ -150,3 +150,112 @@ source_role = "r2"
 path = "data/benchmarks/yeast_btt_err1308583/r2.10000.fq"
 records = 10000
 sha256 = "a4cc4a156568bc78a9945bcb9c0a832f93d8bc583385ce17321105b41e706e4b"
+
+[[datasets]]
+id = "hg002_giab_grch38_chr20"
+scientific_name = "Homo sapiens HG002 / NA24385"
+source = "GIAB/NIST + UCSC"
+study_accession = "GIAB AshkenazimTrio"
+run_accession = "NIST_HiSeq_HG002_Homogeneity-10953946"
+sample_accession = "HG002_NA24385_son"
+experiment_accession = "140528_D00360_0018_AH8VC6ADXX Sample_2A1"
+library_strategy = "WGS"
+library_layout = "PAIRED"
+instrument_model = "Illumina HiSeq 2500"
+read_count = 5000
+base_count = 1480000
+ploidy = "2"
+license = "public_giab_nist; ucsc_hg38_reference"
+provenance_url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/NIST_HiSeq_HG002_Homogeneity-10953946/README_NIST_Illumina_pairedend_HG002.txt"
+ploidy_provenance_url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/latest/NIST_HG002_v5.0q_variant-benchmarksets_README.md"
+notes = "First Tier-3 governed human row. Catalog read/base counts describe the initial 5k-pair prepared subset, not the full GIAB raw source files. Uses GIAB HG002 Illumina paired-end reads with GRCh38 chr20 as the initial human-slice reference anchor; v5.0q GRCh38 benchmark BED/VCF files are the truth source for the next interval-filtered slice."
+
+[[datasets.files]]
+role = "r1"
+url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/NIST_HiSeq_HG002_Homogeneity-10953946/HG002_HiSeq300x_fastq/140528_D00360_0018_AH8VC6ADXX/Project_RM8391_RM8392/Sample_2A1/2A1_CGATGT_L001_R1_001.fastq.gz"
+bytes = 435732787
+
+[[datasets.files]]
+role = "r2"
+url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/NIST_HiSeq_HG002_Homogeneity-10953946/HG002_HiSeq300x_fastq/140528_D00360_0018_AH8VC6ADXX/Project_RM8391_RM8392/Sample_2A1/2A1_CGATGT_L001_R2_001.fastq.gz"
+bytes = 476845426
+
+[[datasets.alignments]]
+role = "grch38_chr20_novoalign_bam"
+url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/NIST_HiSeq_HG002_Homogeneity-10953946/NHGRI_Illumina300X_AJtrio_novoalign_bams/HG002.GRCh38.300x_chr20.bam"
+index_url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/NIST_HiSeq_HG002_Homogeneity-10953946/NHGRI_Illumina300X_AJtrio_novoalign_bams/HG002.GRCh38.300x_chr20.bam.bai"
+bytes = 12100052820
+index_bytes = 267072
+notes = "GIAB/NHGRI Novoalign BAM containing HG002 Illumina HiSeq 300x reads aligned to GRCh38 chr20; used only through indexed HTTPS range queries for interval FASTQ preparation."
+
+[[datasets.references]]
+role = "grch38_chr20_ucsc"
+url = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr20.fa.gz"
+path = "data/benchmarks/hg002_giab_grch38_chr20/reference.fa"
+sha256 = "a704b3a25c698bb5219b750d0ba6a333ddb0043904b4921992d5f709771c2666"
+notes = "UCSC hg38 chr20 FASTA. Source gzip MD5 from UCSC md5sum.txt: 1d42fbb5014b165373aca053f4f24061."
+
+[[datasets.reference_slices]]
+role = "grch38_chr20_10mb_10kb"
+source_role = "grch38_chr20_ucsc"
+region = "chr20:10000000-10010000"
+path = "data/benchmarks/hg002_giab_grch38_chr20/reference.chr20_10000000_10010000.fa"
+sha256 = "3f72211e06f28d0439187da542297d0aa5d002228e776b886ec8f807db7342f4"
+notes = "10,001 bp GRCh38 chr20 interval reference slice used by the interval-filtered Tier-3 row."
+
+[[datasets.truth]]
+role = "giab_v5_0q_grch38_benchmark_bed"
+url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/latest/HG002_GRCh38_v5.0q_smvar.benchmark.bed"
+path = "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.benchmark.bed"
+md5 = "3366858af85875cbb3c579412ffa4c56"
+bytes = 685544
+notes = "GIAB v5.0q GRCh38 small-variant confident regions for HG002."
+
+[[datasets.truth]]
+role = "giab_v5_0q_grch38_smvar_vcf"
+url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/latest/HG002_GRCh38_v5.0q_smvar.vcf.gz"
+path = "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz"
+md5 = "c71acc71069bf7cd7f51eb8fb0c1a1ab"
+bytes = 42067644
+notes = "GIAB v5.0q GRCh38 small-variant VCF for HG002."
+
+[[datasets.truth]]
+role = "giab_v5_0q_grch38_smvar_vcf_index"
+url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/latest/HG002_GRCh38_v5.0q_smvar.vcf.gz.tbi"
+path = "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz.tbi"
+md5 = "58cab2a06e29b74a5bdc190ead079083"
+bytes = 1547524
+notes = "Tabix index for the GIAB v5.0q GRCh38 small-variant VCF."
+
+[[datasets.truth]]
+role = "giab_v5_0q_readme"
+url = "https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/release/AshkenazimTrio/HG002_NA24385_son/latest/NIST_HG002_v5.0q_variant-benchmarksets_README.md"
+path = "data/benchmarks/hg002_giab_grch38_chr20/NIST_HG002_v5.0q_variant-benchmarksets_README.md"
+md5 = "4fe5399696c0c62602897d5f3e4a81f3"
+bytes = 16817
+notes = "GIAB v5.0q benchmark-set README used as the truth-set provenance document."
+
+[[datasets.prepared]]
+role = "r1_5000"
+source_role = "r1"
+path = "data/benchmarks/hg002_giab_grch38_chr20/r1.5000.fq"
+records = 5000
+sha256 = "05869e90473a22e913a3e1206c4140168d6a1aac2e8be3522c7fb6a231629f69"
+
+[[datasets.prepared]]
+role = "r2_5000"
+source_role = "r2"
+path = "data/benchmarks/hg002_giab_grch38_chr20/r2.5000.fq"
+records = 5000
+sha256 = "ae84e0c4b25a9bc27f2fa06551bac7ef6c4be31704c6857ed8b493282a3a26d7"
+
+[[datasets.interval_pairs]]
+role = "chr20_10mb_1000_pairs"
+source_role = "grch38_chr20_novoalign_bam"
+region = "chr20:10000000-10010000"
+records = 1000
+r1_path = "data/benchmarks/hg002_giab_grch38_chr20/r1.chr20_10000000_10010000.1000.fq"
+r2_path = "data/benchmarks/hg002_giab_grch38_chr20/r2.chr20_10000000_10010000.1000.fq"
+r1_sha256 = "8c9760636fe69ad69e6b50092144ed8ccbf90570644f0ada5ac92815596bf0b6"
+r2_sha256 = "882e4c64e16a61e24c83f919ac510cafc0e217dfae5e18808d0d240793c41d1a"
+notes = "First 1,000 paired reads from the indexed GIAB/NHGRI GRCh38 chr20 Novoalign BAM over chr20:10000000-10010000 after singleton/secondary/supplementary filtering."

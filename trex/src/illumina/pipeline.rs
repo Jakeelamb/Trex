@@ -28,6 +28,7 @@ use crate::illumina::diploid::{
 };
 use crate::illumina::fasta::parse_fasta;
 use crate::illumina::fastq::parse_fastq;
+use crate::illumina::fragmentation::{diagnose_fragmentation, FragmentationReport};
 use crate::illumina::io::read_maybe_gzip;
 use crate::illumina::mate;
 use crate::illumina::multik::{select_k, MultiKParams, MultiKSelectionReport};
@@ -125,6 +126,14 @@ impl AssembleOutputs {
         }
     }
 
+    pub fn fragmentation_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("fragmentation.json"))
+        }
+    }
+
     pub fn audit_json_path(&self) -> PathBuf {
         if self.out_dir.as_os_str() == "-" {
             PathBuf::from("-")
@@ -217,6 +226,8 @@ fn apply_phase2_mate_bridge(
     reads: &[Read],
     paired_r1_len: Option<usize>,
     k: usize,
+    insert_mean_bp: Option<u64>,
+    insert_stddev_bp: Option<u64>,
     enabled: bool,
 ) -> Option<mate::MateBridgeStats> {
     if !enabled {
@@ -229,14 +240,22 @@ fn apply_phase2_mate_bridge(
         return None;
     };
 
-    let stats = mate::boost_mate_pairs_on_existing_dbg_edges(graph, reads, n, k);
+    let stats = mate::boost_mate_pairs_on_existing_dbg_edges(
+        graph,
+        reads,
+        n,
+        k,
+        insert_mean_bp,
+        insert_stddev_bp,
+    );
     tracing::info!(
         pairs_seen = stats.pairs_seen,
         pairs_with_endpoint_kmers = stats.pairs_with_endpoint_kmers,
         trusted_endpoint_pairs = stats.trusted_endpoint_pairs,
         existing_edge_pairs = stats.existing_edge_pairs,
+        report_only_pairs = stats.report_only_pairs,
         boosted_edges = stats.boosted_edges,
-        "Phase-2 Illumina mate-pair bridge evidence (existing DBG edges only)"
+        "Phase-2 Illumina mate-pair bridge evidence"
     );
     Some(stats)
 }
@@ -310,6 +329,7 @@ pub struct AssembleResult {
     pub evidence: EvidenceLedger,
     pub graph_annotations: GraphAnnotations,
     pub scaffold_artifact: ScaffoldArtifact,
+    pub fragmentation_report: FragmentationReport,
     pub audit_report: AssemblyAuditReport,
     pub diploid_evidence: DiploidEvidenceReport,
     pub mate_bridge_stats: Option<mate::MateBridgeStats>,
@@ -444,6 +464,8 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
                         &reads,
                         paired_r1_len,
                         selected_k,
+                        params.diploid.insert_mean_bp,
+                        params.diploid.insert_stddev_bp,
                         graph_ck_id.phase2_mate_bridge_v1,
                     );
                     (simplify_stats, simplify_decisions) =
@@ -468,6 +490,8 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
                 &reads,
                 paired_r1_len,
                 selected_k,
+                params.diploid.insert_mean_bp,
+                params.diploid.insert_stddev_bp,
                 graph_ck_id.phase2_mate_bridge_v1,
             );
             (simplify_stats, simplify_decisions) = apply_graph_simplification_with_decisions(
@@ -485,6 +509,8 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
             &reads,
             paired_r1_len,
             selected_k,
+            params.diploid.insert_mean_bp,
+            params.diploid.insert_stddev_bp,
             graph_ck_id.phase2_mate_bridge_v1,
         );
         (simplify_stats, simplify_decisions) =
@@ -569,6 +595,23 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         "illumina pipeline stage complete"
     );
     let stage_start = Instant::now();
+    let graph_annotations = annotate_graph(&graph, &unitig_paths);
+    tracing::info!(
+        stage = "annotate_graph",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
+    let fragmentation_report = diagnose_fragmentation(&graph, &contig_paths, &graph_annotations);
+    tracing::info!(
+        stage = "diagnose_fragmentation",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        graph_dead_end_endpoints = fragmentation_report.summary.graph_dead_end_endpoints,
+        branch_tangle_endpoints = fragmentation_report.summary.branch_tangle_endpoints,
+        repeat_suspected_endpoints = fragmentation_report.summary.repeat_suspected_endpoints,
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
     let scaffold_artifact = build_scaffold_artifact(
         mate_bridge_stats
             .as_ref()
@@ -576,19 +619,14 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
             .unwrap_or(&[]),
         &unitig_paths,
         selected_k,
+        &fragmentation_report,
     );
     tracing::info!(
         stage = "build_scaffold_artifact",
         elapsed_ms = stage_start.elapsed().as_millis(),
         scaffold_paths = scaffold_artifact.paths.len(),
         bridge_candidates = scaffold_artifact.bridge_candidates.len(),
-        "illumina pipeline stage complete"
-    );
-    let stage_start = Instant::now();
-    let graph_annotations = annotate_graph(&graph, &unitig_paths);
-    tracing::info!(
-        stage = "annotate_graph",
-        elapsed_ms = stage_start.elapsed().as_millis(),
+        endpoint_join_candidates = scaffold_artifact.endpoint_join_candidates.len(),
         "illumina pipeline stage complete"
     );
     let stage_start = Instant::now();
@@ -625,6 +663,13 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         repeat_suspected_nodes = graph_annotations.summary.repeat_suspected_nodes,
         repeat_suspected_unitigs = graph_annotations.summary.repeat_suspected_unitigs,
         "graph copy-number and repeat annotations"
+    );
+    tracing::info!(
+        graph_dead_end_endpoints = fragmentation_report.summary.graph_dead_end_endpoints,
+        branch_tangle_endpoints = fragmentation_report.summary.branch_tangle_endpoints,
+        repeat_suspected_endpoints = fragmentation_report.summary.repeat_suspected_endpoints,
+        empty_contig_paths = fragmentation_report.summary.empty_contig_paths,
+        "contig fragmentation endpoint diagnosis"
     );
     tracing::info!(
         audit_findings = audit_report.findings.len(),
@@ -745,6 +790,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
     write_simplification_json(&params.outputs.simplification_path(), &simplify_decisions)?;
     write_scaffolds_json(&params.outputs.scaffolds_path(), &scaffold_artifact)?;
     write_multi_k_json(&params.outputs.multi_k_path(), &multi_k_selection)?;
+    write_fragmentation_json(&params.outputs.fragmentation_path(), &fragmentation_report)?;
     write_audit_json(&params.outputs.audit_json_path(), &audit_report)?;
     write_audit_tsv(&params.outputs.audit_tsv_path(), &audit_report)?;
     write_diploid_json(&params.outputs.diploid_path(), &diploid_evidence)?;
@@ -764,6 +810,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         evidence,
         graph_annotations,
         scaffold_artifact,
+        fragmentation_report,
         audit_report,
         diploid_evidence,
         mate_bridge_stats,
@@ -797,6 +844,10 @@ fn write_multi_k_json(path: &Path, selection: &MultiKSelectionReport) -> Result<
         return Ok(());
     }
     write_json_pretty(path, selection)
+}
+
+fn write_fragmentation_json(path: &Path, report: &FragmentationReport) -> Result<(), TrexError> {
+    write_json_pretty(path, report)
 }
 
 fn write_audit_json(path: &Path, report: &AssemblyAuditReport) -> Result<(), TrexError> {

@@ -152,3 +152,9 @@ Immediate read:
   `target/benchmarks/yeast-btt-audit.json` and `target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/audit.tsv`:
   1,885 contigs, 147,049 assembly k-mers, 147,031 trusted-supported k-mers, 18 low-support k-mers
   in one region, and one collapsed-repeat suspicion finding.
+- Report-only mate endpoint joins exposed a Phase-2 diploid GFA metadata hotspot on E. coli 10k:
+  `prepare_gfa_metadata` took 28,506 ms in
+  `target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex-mate-endpoint-joins/`. Indexing unitigs
+  by first vertex and checking graph neighbors from each tail reduced the same stage to 24 ms in
+  `target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex-mate-endpoint-joins-fast-gfa/`; `graph.gfa`,
+  `contigs.fa`, and `scaffolds.json` were byte-identical between the two runs.

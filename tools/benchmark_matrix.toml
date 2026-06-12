@@ -35,7 +35,7 @@ nightly_scripts = [
   "scripts/reference_quast.sh",
 ]
 required_tools = ["bash", "cargo"]
-optional_tools = ["minimap2", "quast"]
+optional_tools = ["minimap2", "quast.py"]
 artifacts = [
   "target/phase2-graph-summaries/contigs.fa",
   "target/phase2-graph-summaries/graph.gfa",
@@ -123,7 +123,7 @@ fixtures = [
 digest_manifest = "tools/manifest.toml"
 manifest_table = "fixtures.phix174"
 required_tools = ["cargo"]
-optional_tools = ["minimap2", "quast"]
+optional_tools = ["minimap2", "quast.py"]
 artifacts = [
   "target/benchmarks/phix174/trex/contigs.fa",
   "target/benchmarks/phix174/trex/unitigs.fa",
@@ -169,14 +169,14 @@ fixtures = [
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.ecoli_mg1655_srr001666_1k_pairs"
 required_tools = ["cargo"]
-optional_tools = ["minimap2", "quast"]
+optional_tools = ["minimap2", "quast.py"]
 artifacts = [
   "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/contigs.fa",
   "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/unitigs.fa",
   "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/graph.gfa",
 ]
 manual_artifacts = [
-  "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex-quast/report.tsv",
+  "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex-quast/combined_reference/report.tsv",
 ]
 notes = "First larger bacterial biological read row. The full source is 7,047,668 paired spots / 507,432,096 bases; this governed row uses a bounded 1k-pair profile subset."
 
@@ -220,14 +220,14 @@ fixtures = [
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.ecoli_mg1655_srr001666_10k_pairs"
 required_tools = ["cargo"]
-optional_tools = ["minimap2", "quast"]
+optional_tools = ["minimap2", "quast.py"]
 artifacts = [
   "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex/contigs.fa",
   "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex/unitigs.fa",
   "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex/graph.gfa",
 ]
 manual_artifacts = [
-  "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex-quast/report.tsv",
+  "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex-quast/combined_reference/report.tsv",
 ]
 notes = "First bacterial scale-up rung. Still bounded enough for local iteration, but 10x the 1k-pair biological row with the same pinned reference-quality scoring."
 
@@ -271,14 +271,14 @@ fixtures = [
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.ecoli_mg1655_srr001666_100k_pairs"
 required_tools = ["cargo"]
-optional_tools = ["minimap2", "quast"]
+optional_tools = ["minimap2", "quast.py"]
 artifacts = [
   "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex/contigs.fa",
   "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex/unitigs.fa",
   "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex/graph.gfa",
 ]
 manual_artifacts = [
-  "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex-quast/report.tsv",
+  "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex-quast/combined_reference/report.tsv",
 ]
 notes = "Higher-depth bacterial profiling rung. Still bounded for local iteration, but 10x the existing 10k-pair row and high enough to expose real DBG walk and memory-scaling costs."
 
@@ -322,16 +322,16 @@ fixtures = [
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.yeast_btt_err1308583_diploid_1k_pairs"
 required_tools = ["cargo"]
-optional_tools = ["minimap2", "quast"]
+optional_tools = ["minimap2", "quast.py"]
 artifacts = [
   "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/contigs.fa",
   "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/unitigs.fa",
   "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/graph.gfa",
 ]
 manual_artifacts = [
-  "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex-quast/report.tsv",
+  "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex-quast/combined_reference/report.tsv",
 ]
-notes = "First true diploid eukaryotic biological read row. The full source is 14,550,715 paired spots / 2,870,913,582 bases; this governed row uses a bounded 1k-pair profile subset."
+notes = "First true diploid eukaryotic biological read row and Tier-2 manual/release-candidate gate. The full source is 14,550,715 paired spots / 2,870,913,582 bases; this governed row uses a bounded 1k-pair profile subset."
 
 [rows.trex]
 tiers = ["manual"]
@@ -374,14 +374,14 @@ fixtures = [
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.yeast_btt_err1308583_diploid_10k_pairs"
 required_tools = ["cargo"]
-optional_tools = ["minimap2", "quast"]
+optional_tools = ["minimap2", "quast.py"]
 artifacts = [
   "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex/contigs.fa",
   "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex/unitigs.fa",
   "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex/graph.gfa",
 ]
 manual_artifacts = [
-  "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex-quast/report.tsv",
+  "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex-quast/combined_reference/report.tsv",
 ]
 notes = "Higher-depth true diploid eukaryotic profiling rung. Uses 10x the existing BTT subset while staying bounded for local manual profiling before full-run claims."
 
@@ -403,4 +403,114 @@ args = [
   "--diploid",
   "--out-dir",
   "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex",
+]
+
+[[rows]]
+id = "hg002_giab_grch38_chr20_5k_pairs"
+technology = "illumina_pe"
+organism = "Homo sapiens HG002 / NA24385"
+license = "public_giab_nist; ucsc_hg38_reference"
+provenance = "GIAB/NIST HG002 HiSeq Sample_2A1 first 5000 read pairs, UCSC GRCh38 chr20 reference, and GIAB v5.0q GRCh38 small-variant benchmark truth bundle"
+depth_class = "human_giab_chr20_5k_pairs"
+ci_tier = "manual"
+product_claim = "Trex Tier-3 human-slice evidence has a governed HG002/GRCh38 chr20 contract row; this row establishes source, truth, and artifact plumbing before human-readiness claims."
+claim_level = "observed"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
+external_data = "hg002_giab_grch38_chr20"
+fixtures = [
+  "data/benchmarks/hg002_giab_grch38_chr20/reference.fa",
+  "data/benchmarks/hg002_giab_grch38_chr20/r1.5000.fq",
+  "data/benchmarks/hg002_giab_grch38_chr20/r2.5000.fq",
+  "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.benchmark.bed",
+  "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz",
+  "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz.tbi",
+]
+required_tools = ["cargo"]
+optional_tools = ["minimap2", "quast.py"]
+artifacts = [
+  "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex/contigs.fa",
+  "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex/unitigs.fa",
+  "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex/graph.gfa",
+  "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex/audit.json",
+  "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex/diploid.json",
+]
+manual_artifacts = [
+  "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex-quast/combined_reference/report.tsv",
+]
+notes = "First Tier-3 governed row. The prepared 5k-pair source is a WGS prefix and the truth bundle is cataloged now; the next Tier-3 infrastructure slice must add interval-filtered reads before making biological human-slice assembly-quality claims."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex"
+reference = "data/benchmarks/hg002_giab_grch38_chr20/reference.fa"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/hg002_giab_grch38_chr20/r1.5000.fq",
+  "--r2",
+  "data/benchmarks/hg002_giab_grch38_chr20/r2.5000.fq",
+  "--kmer-size",
+  "31",
+  "--trusted-threshold",
+  "1",
+  "--diploid",
+  "--out-dir",
+  "target/benchmarks/hg002_giab_grch38_chr20_5k_pairs/trex",
+]
+
+[[rows]]
+id = "hg002_giab_grch38_chr20_interval_1k_pairs"
+technology = "illumina_pe"
+organism = "Homo sapiens HG002 / NA24385"
+license = "public_giab_nist; ucsc_hg38_reference"
+provenance = "GIAB/NHGRI HG002 HiSeq 300x Novoalign GRCh38 chr20 BAM interval chr20:10000000-10010000, UCSC GRCh38 chr20 interval reference slice, and GIAB v5.0q GRCh38 small-variant benchmark truth bundle"
+depth_class = "human_giab_chr20_interval_1k_pairs"
+ci_tier = "manual"
+product_claim = "Trex Tier-3 human-slice evidence has an interval-filtered HG002/GRCh38 chr20 row with paired reads, matching interval reference, QUAST output, and GIAB truth files available for the next truth-aware metric layer."
+claim_level = "observed"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
+external_data = "hg002_giab_grch38_chr20"
+fixtures = [
+  "data/benchmarks/hg002_giab_grch38_chr20/reference.chr20_10000000_10010000.fa",
+  "data/benchmarks/hg002_giab_grch38_chr20/r1.chr20_10000000_10010000.1000.fq",
+  "data/benchmarks/hg002_giab_grch38_chr20/r2.chr20_10000000_10010000.1000.fq",
+  "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.benchmark.bed",
+  "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz",
+  "data/benchmarks/hg002_giab_grch38_chr20/HG002_GRCh38_v5.0q_smvar.vcf.gz.tbi",
+]
+required_tools = ["cargo"]
+optional_tools = ["minimap2", "quast.py"]
+artifacts = [
+  "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex/contigs.fa",
+  "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex/unitigs.fa",
+  "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex/graph.gfa",
+  "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex/audit.json",
+  "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex/diploid.json",
+]
+manual_artifacts = [
+  "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex-quast/combined_reference/report.tsv",
+]
+notes = "First interval-filtered Tier-3 row. This replaces raw WGS-prefix evidence for human-slice quality work; the next layer should score assembly/read support only inside GIAB confident regions and known variant sites."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex"
+reference = "data/benchmarks/hg002_giab_grch38_chr20/reference.chr20_10000000_10010000.fa"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/hg002_giab_grch38_chr20/r1.chr20_10000000_10010000.1000.fq",
+  "--r2",
+  "data/benchmarks/hg002_giab_grch38_chr20/r2.chr20_10000000_10010000.1000.fq",
+  "--kmer-size",
+  "31",
+  "--trusted-threshold",
+  "1",
+  "--diploid",
+  "--out-dir",
+  "target/benchmarks/hg002_giab_grch38_chr20_interval_1k_pairs/trex",
 ]

@@ -1,0 +1,3 @@
+# ADR 0003 — Phase-2 Illumina benchmark tier boundaries
+
+Accepted. Trex names Phase-2 Illumina benchmark progress by evidence class: Tier 0 is in-repo synthetic PR smoke, Tier 1 is governed small synthetic or real-reference nightly coverage, Tier 2 is governed real eukaryotic diploid evidence that may stay manual or release-candidate when external data is too heavy for CI, and Tier 3 is governed human-slice or GIAB-style evidence. This keeps lower-tier synthetic success from being mistaken for biological or human-slice readiness while still allowing heavyweight rows to be artifact-governed outside default CI.

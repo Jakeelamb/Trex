@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use trex::illumina::diploid::ParentReferenceParams;
+use trex::illumina::mate::MatePairOrientation;
 use trex::illumina::multik::MultiKParams;
 use trex::illumina::pipeline::{
     assemble_illumina, AssembleOutputs, AssembleParams, DiploidParams, SimplifyOverrides,
@@ -95,6 +96,7 @@ fn assemble_single_end_counts_and_trusted() {
     assert!(out.outputs.annotations_path().exists());
     assert!(out.outputs.simplification_path().exists());
     assert!(out.outputs.scaffolds_path().exists());
+    assert!(out.outputs.fragmentation_path().exists());
     assert!(out.outputs.audit_json_path().exists());
     assert!(out.outputs.audit_tsv_path().exists());
     assert!(!out.outputs.multi_k_path().exists());
@@ -183,6 +185,10 @@ fn annotations_sidecar_preserves_phase1_golden_outputs() {
     assert!(simplification.contains("\"diamonds\""));
     let scaffolds = std::fs::read_to_string(out.outputs.scaffolds_path()).unwrap();
     assert!(scaffolds.contains("\"bridge_candidates\""));
+    let fragmentation = std::fs::read_to_string(out.outputs.fragmentation_path()).unwrap();
+    assert!(fragmentation.contains("\"schema_version\""));
+    assert!(fragmentation.contains("\"graph_dead_end_endpoints\""));
+    assert_eq!(out.fragmentation_report.summary.contigs, out.contig_count);
     let audit_json = std::fs::read_to_string(out.outputs.audit_json_path()).unwrap();
     assert!(audit_json.contains("\"low_support_kmers\""));
     let audit_tsv = std::fs::read_to_string(out.outputs.audit_tsv_path()).unwrap();
@@ -312,9 +318,30 @@ fn phase2_mate_bridge_reports_typed_evidence_counters() {
     assert_eq!(stats.pairs_with_endpoint_kmers, 1);
     assert_eq!(stats.trusted_endpoint_pairs, 1);
     assert_eq!(stats.existing_edge_pairs, 1);
+    assert_eq!(stats.report_only_pairs, 0);
     assert_eq!(stats.boosted_edges, 1);
     assert_eq!(stats.candidates.len(), 1);
+    assert_eq!(
+        stats.candidates[0].orientation,
+        MatePairOrientation::R1TailToR2Head
+    );
+    assert_eq!(
+        stats.candidates[0]
+            .distance
+            .as_ref()
+            .map(|distance| distance.estimated_gap_bp),
+        Some(-8)
+    );
+    assert_eq!(
+        stats.candidates[0]
+            .distance
+            .as_ref()
+            .map(|distance| distance.confidence),
+        Some(50)
+    );
+    assert_eq!(stats.candidates[0].score, 150);
     assert_eq!(out.scaffold_artifact.bridge_candidates.len(), 1);
+    assert_eq!(out.scaffold_artifact.endpoint_join_candidates.len(), 0);
     assert_eq!(out.evidence.records.len(), 1);
     let record = &out.evidence.records[0];
     assert_eq!(record.support.observed, 1);
@@ -327,6 +354,9 @@ fn phase2_mate_bridge_reports_typed_evidence_counters() {
     assert!(evidence_text.contains("\"mate_bridge_existing_edge\""));
     let scaffolds_text = std::fs::read_to_string(out.outputs.scaffolds_path()).unwrap();
     assert!(scaffolds_text.contains("\"support_pairs\""));
+    assert!(scaffolds_text.contains("\"orientation\""));
+    assert!(scaffolds_text.contains("\"r1_tail_to_r2_head\""));
+    assert!(scaffolds_text.contains("\"estimated_gap_bp\""));
 }
 
 #[test]
@@ -390,6 +420,86 @@ fn mate_scaffold_sidecar_does_not_change_primary_contigs() {
         std::fs::read(with.outputs.contigs_path()).unwrap(),
         std::fs::read(without.outputs.contigs_path()).unwrap()
     );
+}
+
+#[test]
+fn mate_endpoint_join_candidates_are_report_only_for_missing_dbg_edges() {
+    let with_dir = tempfile::tempdir().unwrap();
+    let without_dir = tempfile::tempdir().unwrap();
+    let r1 = write_tmp(with_dir.path(), "r1.fq", b"@frag/1\nAAAACGT\n+\nIIIIIII\n");
+    let r2 = write_tmp(with_dir.path(), "r2.fq", b"@frag/2\nTTAAGGG\n+\nIIIIIII\n");
+
+    let with_params = AssembleParams {
+        r1_path: r1.clone(),
+        r2_path: Some(r2.clone()),
+        k: 4,
+        trusted_threshold: 1,
+        checkpoint_root: None,
+        resume: false,
+        strict_checkpoints: false,
+        simplify: SimplifyOverrides::default(),
+        diploid: DiploidParams {
+            enabled: true,
+            insert_mean_bp: Some(8),
+            insert_stddev_bp: None,
+            ..Default::default()
+        },
+        multi_k: Default::default(),
+        outputs: outputs_in(with_dir.path()),
+    };
+    let without_params = AssembleParams {
+        r1_path: r1,
+        r2_path: Some(r2),
+        k: 4,
+        trusted_threshold: 1,
+        checkpoint_root: None,
+        resume: false,
+        strict_checkpoints: false,
+        simplify: SimplifyOverrides::default(),
+        diploid: DiploidParams {
+            enabled: true,
+            insert_mean_bp: None,
+            insert_stddev_bp: None,
+            ..Default::default()
+        },
+        multi_k: Default::default(),
+        outputs: outputs_in(without_dir.path()),
+    };
+
+    let with = assemble_illumina(&with_params).unwrap();
+    let without = assemble_illumina(&without_params).unwrap();
+
+    let stats = with.mate_bridge_stats.as_ref().expect("mate bridge stats");
+    assert_eq!(stats.existing_edge_pairs, 0);
+    assert_eq!(stats.report_only_pairs, 1);
+    assert_eq!(stats.boosted_edges, 0);
+    assert_eq!(
+        stats.candidates[0].orientation,
+        MatePairOrientation::R1TailToR2Head
+    );
+    assert_eq!(
+        stats.candidates[0]
+            .distance
+            .as_ref()
+            .map(|distance| distance.estimated_gap_bp),
+        Some(-6)
+    );
+    assert_eq!(with.scaffold_artifact.bridge_candidates.len(), 1);
+    assert_eq!(with.scaffold_artifact.endpoint_join_candidates.len(), 1);
+    assert!(with.scaffold_artifact.paths.is_empty());
+    assert_eq!(
+        with.scaffold_artifact.endpoint_join_candidates[0].source,
+        "mate_pair_endpoint_join_report_only"
+    );
+    assert_eq!(
+        std::fs::read(with.outputs.contigs_path()).unwrap(),
+        std::fs::read(without.outputs.contigs_path()).unwrap()
+    );
+    let scaffolds = std::fs::read_to_string(with.outputs.scaffolds_path()).unwrap();
+    assert!(scaffolds.contains("\"endpoint_join_candidates\""));
+    assert!(scaffolds.contains("\"orientation\""));
+    assert!(scaffolds.contains("\"estimated_gap_bp\""));
+    assert!(scaffolds.contains("\"confidence\""));
 }
 
 #[test]

@@ -88,36 +88,48 @@ pub fn unitig_adjacency_links(
     let overlap_cigar = format!("{}M", k.saturating_sub(1));
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
+    let mut first_node_to_unitigs: BTreeMap<&[u8], Vec<usize>> = BTreeMap::new();
+
+    for (j, path) in unitig_paths.iter().enumerate() {
+        if path.len() < 2 {
+            continue;
+        }
+        if let Some(first) = path.first() {
+            first_node_to_unitigs
+                .entry(first.as_slice())
+                .or_default()
+                .push(j);
+        }
+    }
 
     for (i, pi) in unitig_paths.iter().enumerate() {
         if pi.len() < 2 {
             continue;
         }
-        let li = pi.last().expect("non-empty");
-        for (j, pj) in unitig_paths.iter().enumerate() {
-            if i == j || pj.len() < 2 {
+        let Some(li) = pi.last() else {
+            continue;
+        };
+        let Some(neighbors) = graph.adj.get(li) else {
+            continue;
+        };
+        for fj in neighbors.keys() {
+            let Some(candidate_unitigs) = first_node_to_unitigs.get(fj.as_slice()) else {
                 continue;
-            }
-            let fj = pj.first().expect("non-empty");
-            if graph
-                .adj
-                .get(li)
-                .and_then(|m| m.get(fj))
-                .copied()
-                .unwrap_or(0)
-                == 0
-            {
-                continue;
-            }
-            let key = (i, '+', j, '+');
-            if seen.insert(key) {
-                out.push(UnitigGfaLink {
-                    from_utg: i + 1,
-                    from_orient: '+',
-                    to_utg: j + 1,
-                    to_orient: '+',
-                    overlap_cigar: overlap_cigar.clone(),
-                });
+            };
+            for j in candidate_unitigs {
+                if i == *j {
+                    continue;
+                }
+                let key = (i, '+', *j, '+');
+                if seen.insert(key) {
+                    out.push(UnitigGfaLink {
+                        from_utg: i + 1,
+                        from_orient: '+',
+                        to_utg: *j + 1,
+                        to_orient: '+',
+                        overlap_cigar: overlap_cigar.clone(),
+                    });
+                }
             }
         }
     }
@@ -438,10 +450,13 @@ pub fn write_gfa1(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         contig_path_matches_unitig_primary_path, contig_path_partition_full_unitigs,
-        primary_contig_paths_for_gfa,
+        primary_contig_paths_for_gfa, unitig_adjacency_links,
     };
+    use crate::dbg::graph::DbgGraph;
 
     #[test]
     fn contig_path_unitig_forward_and_reverse() {
@@ -479,5 +494,40 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, "ctg000002");
         assert_eq!(out[0].1, vec![(1, '+')]);
+    }
+
+    #[test]
+    fn unitig_adjacency_links_use_indexed_tail_to_head_edges() {
+        let graph = DbgGraph::from_checkpoint_parts(
+            3,
+            BTreeMap::from([
+                (b"AAA".to_vec(), 1),
+                (b"AAC".to_vec(), 1),
+                (b"ACC".to_vec(), 1),
+                (b"CCC".to_vec(), 1),
+                (b"GGG".to_vec(), 1),
+                (b"GGT".to_vec(), 1),
+            ]),
+            vec![
+                (b"AAC".to_vec(), b"ACC".to_vec(), 1),
+                (b"AAC".to_vec(), b"GGT".to_vec(), 1),
+                (b"AAA".to_vec(), b"GGG".to_vec(), 1),
+            ],
+        )
+        .expect("graph");
+        let unitigs = vec![
+            vec![b"AAA".to_vec(), b"AAC".to_vec()],
+            vec![b"ACC".to_vec(), b"CCC".to_vec()],
+            vec![b"GGG".to_vec(), b"GGT".to_vec()],
+        ];
+
+        let links = unitig_adjacency_links(&graph, &unitigs);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from_utg, 1);
+        assert_eq!(links[0].to_utg, 2);
+        assert_eq!(links[0].from_orient, '+');
+        assert_eq!(links[0].to_orient, '+');
+        assert_eq!(links[0].overlap_cigar, "2M");
     }
 }

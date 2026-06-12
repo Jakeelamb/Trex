@@ -158,7 +158,15 @@ struct DataSet {
     notes: String,
     files: Vec<DataFile>,
     #[serde(default)]
+    alignments: Vec<DataAlignmentFile>,
+    #[serde(default)]
     references: Vec<DataReference>,
+    #[serde(default)]
+    reference_slices: Vec<DataReferenceSlice>,
+    #[serde(default)]
+    truth: Vec<DataTruthFile>,
+    #[serde(default)]
+    interval_pairs: Vec<IntervalPairDataFile>,
     #[serde(default)]
     prepared: Vec<PreparedDataFile>,
 }
@@ -167,7 +175,7 @@ struct DataSet {
 struct DataFile {
     role: String,
     url: String,
-    md5: String,
+    md5: Option<String>,
     bytes: u64,
 }
 
@@ -181,12 +189,62 @@ struct PreparedDataFile {
 }
 
 #[derive(Debug, Deserialize)]
+struct DataAlignmentFile {
+    role: String,
+    url: String,
+    index_url: Option<String>,
+    bytes: Option<u64>,
+    index_bytes: Option<u64>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IntervalPairDataFile {
+    role: String,
+    source_role: String,
+    region: String,
+    records: usize,
+    r1_path: String,
+    r2_path: String,
+    r1_sha256: Option<String>,
+    r2_sha256: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct DataReference {
     role: String,
     url: String,
     path: String,
     sha256: Option<String>,
     notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataReferenceSlice {
+    role: String,
+    source_role: String,
+    region: String,
+    path: String,
+    sha256: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataTruthFile {
+    role: String,
+    url: String,
+    path: String,
+    md5: Option<String>,
+    bytes: Option<u64>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GenomicRegion {
+    contig: String,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,9 +262,19 @@ struct FrameworkModule {
     summary: String,
     papers: Vec<String>,
     current_files: Vec<String>,
+    promotion_stages: Vec<String>,
     gates: Vec<String>,
     next_work: Vec<String>,
 }
+
+const PROMOTION_STAGES: &[&str] = &[
+    "report_only_candidate",
+    "scaffold_artifact",
+    "gfa_path",
+    "fasta_scaffold_with_gaps",
+    "graph_edit",
+    "polishing_edit",
+];
 
 #[derive(Serialize)]
 struct BenchReport {
@@ -292,6 +360,7 @@ struct AssemblyMetrics {
     simplification: Option<serde_json::Value>,
     scaffolds: Option<serde_json::Value>,
     multi_k: Option<serde_json::Value>,
+    fragmentation: Option<serde_json::Value>,
     audit: Option<serde_json::Value>,
     diploid: Option<serde_json::Value>,
     reference_quality: Option<ReferenceQuality>,
@@ -723,8 +792,10 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
             if !file.url.starts_with("https://") {
                 return Err(format!("{}: file URL must be https: {}", dataset.id, file.url).into());
             }
-            if file.md5.len() != 32 || !file.md5.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("{}: invalid md5 for {}", dataset.id, file.role).into());
+            if let Some(md5) = file.md5.as_deref() {
+                if md5.len() != 32 || !md5.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!("{}: invalid md5 for {}", dataset.id, file.role).into());
+                }
             }
             if file.bytes == 0 {
                 return Err(
@@ -734,6 +805,56 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
         }
         if roles.is_empty() {
             return Err(format!("{}: at least one source file is required", dataset.id).into());
+        }
+
+        let mut alignment_roles = BTreeSet::new();
+        for alignment in &dataset.alignments {
+            if !alignment_roles.insert(alignment.role.clone()) {
+                return Err(format!(
+                    "{}: duplicate alignment role {}",
+                    dataset.id, alignment.role
+                )
+                .into());
+            }
+            if !alignment.url.starts_with("https://") {
+                return Err(format!(
+                    "{}: alignment URL must be https: {}",
+                    dataset.id, alignment.url
+                )
+                .into());
+            }
+            if let Some(index_url) = alignment.index_url.as_deref() {
+                if !index_url.starts_with("https://") {
+                    return Err(format!(
+                        "{}: alignment index URL must be https: {}",
+                        dataset.id, index_url
+                    )
+                    .into());
+                }
+            }
+            if alignment.bytes == Some(0) {
+                return Err(format!(
+                    "{}: alignment bytes must be non-zero for {}",
+                    dataset.id, alignment.role
+                )
+                .into());
+            }
+            if alignment.index_bytes == Some(0) {
+                return Err(format!(
+                    "{}: alignment index bytes must be non-zero for {}",
+                    dataset.id, alignment.role
+                )
+                .into());
+            }
+            if let Some(notes) = alignment.notes.as_deref() {
+                if notes.trim().is_empty() {
+                    return Err(format!(
+                        "{}: alignment {} notes must not be empty when present",
+                        dataset.id, alignment.role
+                    )
+                    .into());
+                }
+            }
         }
 
         let mut reference_roles = BTreeSet::new();
@@ -787,6 +908,203 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
                         dataset.id, reference.role
                     )
                     .into());
+                }
+            }
+        }
+
+        let mut reference_slice_roles = BTreeSet::new();
+        for slice in &dataset.reference_slices {
+            if !reference_slice_roles.insert(slice.role.clone()) {
+                return Err(format!(
+                    "{}: duplicate reference slice role {}",
+                    dataset.id, slice.role
+                )
+                .into());
+            }
+            if !reference_roles.contains(&slice.source_role) {
+                return Err(format!(
+                    "{}: reference slice {} references unknown reference role {}",
+                    dataset.id, slice.role, slice.source_role
+                )
+                .into());
+            }
+            parse_region(&slice.region)?;
+            require_rel_path(
+                root,
+                &dataset.id,
+                "reference_slice.path",
+                &slice.path,
+                false,
+            )?;
+            if !slice.path.starts_with("data/") {
+                return Err(format!(
+                    "{}: reference slice data must live under data/: {}",
+                    dataset.id, slice.path
+                )
+                .into());
+            }
+            if let Some(expected) = slice.sha256.as_deref() {
+                if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "{}: invalid sha256 for reference slice {}",
+                        dataset.id, slice.role
+                    )
+                    .into());
+                }
+                let path = root.join(&slice.path);
+                if path.exists() {
+                    let got = sha256_file(&path)?;
+                    if got != expected {
+                        return Err(format!(
+                            "{}: reference slice {} digest mismatch: got {}, expected {}",
+                            dataset.id, slice.role, got, expected
+                        )
+                        .into());
+                    }
+                }
+            }
+            if let Some(notes) = slice.notes.as_deref() {
+                if notes.trim().is_empty() {
+                    return Err(format!(
+                        "{}: reference slice {} notes must not be empty when present",
+                        dataset.id, slice.role
+                    )
+                    .into());
+                }
+            }
+        }
+
+        let mut truth_roles = BTreeSet::new();
+        for truth in &dataset.truth {
+            if !truth_roles.insert(truth.role.clone()) {
+                return Err(format!("{}: duplicate truth role {}", dataset.id, truth.role).into());
+            }
+            if !truth.url.starts_with("https://") {
+                return Err(
+                    format!("{}: truth URL must be https: {}", dataset.id, truth.url).into(),
+                );
+            }
+            require_rel_path(root, &dataset.id, "truth.path", &truth.path, false)?;
+            if !truth.path.starts_with("data/") {
+                return Err(format!(
+                    "{}: truth data must live under data/: {}",
+                    dataset.id, truth.path
+                )
+                .into());
+            }
+            if let Some(md5) = truth.md5.as_deref() {
+                if md5.len() != 32 || !md5.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(
+                        format!("{}: invalid md5 for truth {}", dataset.id, truth.role).into(),
+                    );
+                }
+            }
+            if truth.bytes == Some(0) {
+                return Err(format!(
+                    "{}: truth bytes must be non-zero for {}",
+                    dataset.id, truth.role
+                )
+                .into());
+            }
+            if let Some(notes) = truth.notes.as_deref() {
+                if notes.trim().is_empty() {
+                    return Err(format!(
+                        "{}: truth {} notes must not be empty when present",
+                        dataset.id, truth.role
+                    )
+                    .into());
+                }
+            }
+        }
+
+        let mut interval_pair_roles = BTreeSet::new();
+        for pair in &dataset.interval_pairs {
+            if !interval_pair_roles.insert(pair.role.clone()) {
+                return Err(
+                    format!("{}: duplicate interval pair role {}", dataset.id, pair.role).into(),
+                );
+            }
+            if !alignment_roles.contains(&pair.source_role) {
+                return Err(format!(
+                    "{}: interval pair {} references unknown alignment role {}",
+                    dataset.id, pair.role, pair.source_role
+                )
+                .into());
+            }
+            if pair.region.trim().is_empty()
+                || pair.region.contains(char::is_whitespace)
+                || !pair.region.contains(':')
+                || !pair.region.contains('-')
+            {
+                return Err(format!(
+                    "{}: interval pair {} has invalid region {}",
+                    dataset.id, pair.role, pair.region
+                )
+                .into());
+            }
+            if pair.records == 0 {
+                return Err(format!(
+                    "{}: interval pair {} records must be non-zero",
+                    dataset.id, pair.role
+                )
+                .into());
+            }
+            for (field, path) in [("r1_path", &pair.r1_path), ("r2_path", &pair.r2_path)] {
+                require_rel_path(root, &dataset.id, field, path, false)?;
+                if !path.starts_with("data/") {
+                    return Err(format!(
+                        "{}: interval pair data must live under data/: {}",
+                        dataset.id, path
+                    )
+                    .into());
+                }
+            }
+            for (label, sha) in [
+                ("r1_sha256", pair.r1_sha256.as_deref()),
+                ("r2_sha256", pair.r2_sha256.as_deref()),
+            ] {
+                if let Some(sha) = sha {
+                    if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Err(format!(
+                            "{}: invalid {} for interval pair {}",
+                            dataset.id, label, pair.role
+                        )
+                        .into());
+                    }
+                }
+            }
+            if let Some(notes) = pair.notes.as_deref() {
+                if notes.trim().is_empty() {
+                    return Err(format!(
+                        "{}: interval pair {} notes must not be empty when present",
+                        dataset.id, pair.role
+                    )
+                    .into());
+                }
+            }
+            let r1_path = root.join(&pair.r1_path);
+            let r2_path = root.join(&pair.r2_path);
+            if r1_path.exists() || r2_path.exists() {
+                validate_paired_fastq_record_count(&r1_path, &r2_path, pair.records)?;
+                if let Some(expected) = pair.r1_sha256.as_deref() {
+                    let got = sha256_file(&r1_path)?;
+                    if got != expected {
+                        return Err(format!(
+                            "{}: interval pair {} r1 digest mismatch: got {}, expected {}",
+                            dataset.id, pair.role, got, expected
+                        )
+                        .into());
+                    }
+                }
+                if let Some(expected) = pair.r2_sha256.as_deref() {
+                    let got = sha256_file(&r2_path)?;
+                    if got != expected {
+                        return Err(format!(
+                            "{}: interval pair {} r2 digest mismatch: got {}, expected {}",
+                            dataset.id, pair.role, got, expected
+                        )
+                        .into());
+                    }
                 }
             }
         }
@@ -852,6 +1170,16 @@ fn validate_assembler_framework(root: &Path) -> DynResult<()> {
     }
 
     let doc = fs::read_to_string(root.join("docs/ASSEMBLER_FRAMEWORK.md"))?;
+    let blueprint = fs::read_to_string(root.join("docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md"))?;
+    for stage in PROMOTION_STAGES {
+        if !blueprint.contains(stage) {
+            return Err(format!(
+                "docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md missing promotion stage {stage}"
+            )
+            .into());
+        }
+    }
+
     let mut seen = BTreeSet::new();
     for module in &framework.modules {
         if module.id.trim().is_empty() {
@@ -886,12 +1214,29 @@ fn validate_assembler_framework(root: &Path) -> DynResult<()> {
             &module.current_files,
             true,
         )?;
+        validate_framework_list(
+            root,
+            &module.id,
+            "promotion_stages",
+            &module.promotion_stages,
+            false,
+        )?;
+        for stage in &module.promotion_stages {
+            if !PROMOTION_STAGES.contains(&stage.as_str()) {
+                return Err(format!("{}: unsupported promotion stage {stage}", module.id).into());
+            }
+        }
         validate_framework_list(root, &module.id, "gates", &module.gates, false)?;
         validate_framework_list(root, &module.id, "next_work", &module.next_work, false)?;
 
-        if !doc.contains(&module.id.replace('_', " ")) && !doc.contains(&module.id) {
+        let module_words = module.id.replace('_', " ");
+        if !doc.contains(&module_words)
+            && !doc.contains(&module.id)
+            && !blueprint.contains(&module_words)
+            && !blueprint.contains(&module.id)
+        {
             return Err(format!(
-                "docs/ASSEMBLER_FRAMEWORK.md does not mention framework module {}",
+                "framework docs do not mention framework module {}",
                 module.id
             )
             .into());
@@ -910,6 +1255,7 @@ fn validate_development_docs(root: &Path) -> DynResult<()> {
     let roadmap_path = root.join("docs/ROADMAP.md");
     let development = fs::read_to_string(&development_path)?;
     let roadmap = fs::read_to_string(&roadmap_path)?;
+    let blueprint = fs::read_to_string(root.join("docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md"))?;
     let readme = fs::read_to_string(root.join("README.md"))?;
     let capabilities = fs::read_to_string(root.join("docs/CAPABILITIES.md"))?;
 
@@ -962,6 +1308,33 @@ fn validate_development_docs(root: &Path) -> DynResult<()> {
         }
     }
 
+    for phrase in [
+        "read correction / trusted k-mer model",
+        "multi-k graph ladder",
+        "repeat-aware graph annotation",
+        "decision-first simplification",
+        "mate-pair distance/orientation evidence",
+        "scaffold/path promotion",
+        "polishing/audit loop",
+        "diploid ambiguity handling",
+        "quality gates and benchmark claims",
+    ] {
+        if !blueprint.contains(phrase) {
+            return Err(format!(
+                "docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md missing architecture phrase: {phrase}"
+            )
+            .into());
+        }
+    }
+
+    for wave in ["Wave A", "Wave B", "Wave C", "Wave D", "Wave E", "Wave F"] {
+        if !roadmap.contains(wave) || !blueprint.contains(wave) {
+            return Err(
+                format!("framework wave {wave} must appear in roadmap and blueprint").into(),
+            );
+        }
+    }
+
     for lane in [
         "Quality gates",
         "Evidence ledger",
@@ -979,13 +1352,20 @@ fn validate_development_docs(root: &Path) -> DynResult<()> {
         }
     }
 
-    for doc in ["docs/DEVELOPMENT.md", "docs/ROADMAP.md"] {
+    for doc in [
+        "docs/DEVELOPMENT.md",
+        "docs/ROADMAP.md",
+        "docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md",
+    ] {
         if !readme.contains(doc) {
             return Err(format!("README.md missing link to {doc}").into());
         }
     }
     if !capabilities.contains("validate-development") {
         return Err("docs/CAPABILITIES.md missing validate-development command".into());
+    }
+    if !capabilities.contains("docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md") {
+        return Err("docs/CAPABILITIES.md missing blueprint link".into());
     }
 
     println!("xtask validate-development: OK");
@@ -1539,6 +1919,7 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let simplification = json_optional(&out_dir.join("simplification.json"))?;
     let scaffolds = json_optional(&out_dir.join("scaffolds.json"))?;
     let multi_k = json_optional(&out_dir.join("multi_k.json"))?;
+    let fragmentation = json_optional(&out_dir.join("fragmentation.json"))?;
     let audit = json_optional(&out_dir.join("audit.json"))?;
     let diploid = json_optional(&out_dir.join("diploid.json"))?;
     let reference_quality = match (trex.reference.as_deref(), kmer_size) {
@@ -1590,6 +1971,7 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         simplification,
         scaffolds,
         multi_k,
+        fragmentation,
         audit,
         diploid,
         reference_quality,
@@ -1840,6 +2222,70 @@ fn fasta_sequences(path: &Path) -> DynResult<Vec<Vec<u8>>> {
         seqs.push(cur);
     }
     Ok(seqs)
+}
+
+fn fasta_sequence_for_contig(path: &Path, target: &str) -> DynResult<Vec<u8>> {
+    let text = fs::read_to_string(path)?;
+    let mut current_name: Option<String> = None;
+    let mut current_sequence = Vec::new();
+    for line in text.lines() {
+        if let Some(header) = line.strip_prefix('>') {
+            if current_name.as_deref() == Some(target) {
+                return Ok(current_sequence);
+            }
+            current_name = header.split_whitespace().next().map(str::to_string);
+            current_sequence = Vec::new();
+        } else if current_name.is_some() {
+            current_sequence.extend(line.trim().as_bytes().iter().map(u8::to_ascii_uppercase));
+        }
+    }
+    if current_name.as_deref() == Some(target) {
+        return Ok(current_sequence);
+    }
+    Err(format!("{}: FASTA contig {target:?} not found", path.display()).into())
+}
+
+fn parse_region(value: &str) -> DynResult<GenomicRegion> {
+    let (contig, rest) = value
+        .split_once(':')
+        .ok_or_else(|| format!("invalid genomic region {value:?}: missing ':'"))?;
+    let (start, end) = rest
+        .split_once('-')
+        .ok_or_else(|| format!("invalid genomic region {value:?}: missing '-'"))?;
+    if contig.trim().is_empty() {
+        return Err(format!("invalid genomic region {value:?}: empty contig").into());
+    }
+    let start = start
+        .replace(',', "")
+        .parse::<usize>()
+        .map_err(|_| format!("invalid genomic region {value:?}: bad start"))?;
+    let end = end
+        .replace(',', "")
+        .parse::<usize>()
+        .map_err(|_| format!("invalid genomic region {value:?}: bad end"))?;
+    if start == 0 || end < start {
+        return Err(
+            format!("invalid genomic region {value:?}: expected 1-based start <= end").into(),
+        );
+    }
+    Ok(GenomicRegion {
+        contig: contig.to_string(),
+        start,
+        end,
+    })
+}
+
+fn write_wrapped_fasta(path: &Path, name: &str, sequence: &[u8]) -> DynResult<()> {
+    let mut out = String::new();
+    out.push('>');
+    out.push_str(name);
+    out.push('\n');
+    for chunk in sequence.chunks(80) {
+        out.push_str(std::str::from_utf8(chunk)?);
+        out.push('\n');
+    }
+    fs::write(path, out)?;
+    Ok(())
 }
 
 fn reference_quality(
@@ -2120,6 +2566,38 @@ fn fetch_dataset(root: &Path, dataset: &DataSet) -> DynResult<()> {
     for reference in &dataset.references {
         fetch_reference(root, dataset, reference)?;
     }
+    let references: BTreeMap<&str, &DataReference> = dataset
+        .references
+        .iter()
+        .map(|reference| (reference.role.as_str(), reference))
+        .collect();
+    for slice in &dataset.reference_slices {
+        let source = references.get(slice.source_role.as_str()).ok_or_else(|| {
+            format!(
+                "{}: reference slice {} references unknown reference role {}",
+                dataset.id, slice.role, slice.source_role
+            )
+        })?;
+        fetch_reference_slice(root, dataset, source, slice)?;
+    }
+    for truth in &dataset.truth {
+        fetch_truth_file(root, dataset, truth)?;
+    }
+
+    let alignments: BTreeMap<&str, &DataAlignmentFile> = dataset
+        .alignments
+        .iter()
+        .map(|alignment| (alignment.role.as_str(), alignment))
+        .collect();
+    for pair in &dataset.interval_pairs {
+        let source = alignments.get(pair.source_role.as_str()).ok_or_else(|| {
+            format!(
+                "{}: interval pair {} references unknown alignment role {}",
+                dataset.id, pair.role, pair.source_role
+            )
+        })?;
+        fetch_interval_pair(root, dataset, source, pair)?;
+    }
 
     let files: BTreeMap<&str, &DataFile> = dataset
         .files
@@ -2170,6 +2648,203 @@ fn fetch_dataset(root: &Path, dataset: &DataSet) -> DynResult<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn fetch_reference_slice(
+    root: &Path,
+    dataset: &DataSet,
+    source: &DataReference,
+    slice: &DataReferenceSlice,
+) -> DynResult<()> {
+    let out_path = root.join(&slice.path);
+    let expected = slice.sha256.as_deref();
+    if out_path.exists() {
+        let got = sha256_file(&out_path)?;
+        if expected.map(|sha| sha == got).unwrap_or(false) {
+            println!(
+                "xtask fetch-data: {} reference slice {} already present ({got})",
+                dataset.id, slice.role
+            );
+            return Ok(());
+        }
+    }
+
+    let region = parse_region(&slice.region)?;
+    let source_path = root.join(&source.path);
+    let sequence = fasta_sequence_for_contig(&source_path, &region.contig)?;
+    if region.end > sequence.len() {
+        return Err(format!(
+            "{}: reference slice {} end {} exceeds {} length {}",
+            dataset.id,
+            slice.role,
+            region.end,
+            region.contig,
+            sequence.len()
+        )
+        .into());
+    }
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = out_path.with_extension("tmp");
+    let subseq = &sequence[(region.start - 1)..region.end];
+    write_wrapped_fasta(&tmp, &slice.region, subseq)?;
+    let got = sha256_file(&tmp)?;
+    match expected {
+        Some(expected) if expected == got => {}
+        Some(expected) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!(
+                "xtask fetch-data: {} reference slice {} digest mismatch: got {}, expected {}",
+                dataset.id, slice.role, got, expected
+            )
+            .into());
+        }
+        None => {}
+    }
+    fs::rename(tmp, &out_path)?;
+    println!(
+        "xtask fetch-data: {} reference slice {} wrote {} bp sha256={got}",
+        dataset.id,
+        slice.role,
+        subseq.len()
+    );
+    Ok(())
+}
+
+fn fetch_interval_pair(
+    root: &Path,
+    dataset: &DataSet,
+    source: &DataAlignmentFile,
+    pair: &IntervalPairDataFile,
+) -> DynResult<()> {
+    let r1_path = root.join(&pair.r1_path);
+    let r2_path = root.join(&pair.r2_path);
+    if r1_path.exists() && r2_path.exists() {
+        validate_paired_fastq_record_count(&r1_path, &r2_path, pair.records)?;
+        let r1 = sha256_file(&r1_path)?;
+        let r2 = sha256_file(&r2_path)?;
+        let r1_ok = pair
+            .r1_sha256
+            .as_deref()
+            .map(|expected| expected == r1)
+            .unwrap_or(false);
+        let r2_ok = pair
+            .r2_sha256
+            .as_deref()
+            .map(|expected| expected == r2)
+            .unwrap_or(false);
+        if r1_ok && r2_ok {
+            println!(
+                "xtask fetch-data: {} {} already present r1_sha256={} r2_sha256={}",
+                dataset.id, pair.role, r1, r2
+            );
+            return Ok(());
+        }
+    }
+
+    if let Some(parent) = r1_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = r2_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let scratch = root
+        .join("target/benchmarks/fetch-tmp")
+        .join(&dataset.id)
+        .join(&pair.role);
+    fs::create_dir_all(&scratch)?;
+    let r1_all = scratch.join("r1.all.fq");
+    let r2_all = scratch.join("r2.all.fq");
+    let singleton = scratch.join("singletons.fq");
+    let other = scratch.join("other.fq");
+    for path in [&r1_all, &r2_all, &singleton, &other] {
+        let _ = fs::remove_file(path);
+    }
+
+    let script = format!(
+        "samtools view -u -f 3 -F 2304 '{}' '{}' | samtools collate -u -O - | samtools fastq -n -1 '{}' -2 '{}' -0 '{}' -s '{}' -",
+        source.url,
+        pair.region,
+        r1_all.display(),
+        r2_all.display(),
+        other.display(),
+        singleton.display()
+    );
+    let status = Command::new("bash").arg("-c").arg(&script).status()?;
+    if !status.success() {
+        return Err(format!(
+            "xtask fetch-data: {} {} interval extraction failed",
+            dataset.id, pair.role
+        )
+        .into());
+    }
+
+    let r1_tmp = r1_path.with_extension("tmp");
+    let r2_tmp = r2_path.with_extension("tmp");
+    write_fastq_prefix(&r1_all, &r1_tmp, pair.records)?;
+    write_fastq_prefix(&r2_all, &r2_tmp, pair.records)?;
+    validate_paired_fastq_record_count(&r1_tmp, &r2_tmp, pair.records)?;
+    let r1 = sha256_file(&r1_tmp)?;
+    let r2 = sha256_file(&r2_tmp)?;
+    match (pair.r1_sha256.as_deref(), pair.r2_sha256.as_deref()) {
+        (Some(expected_r1), Some(expected_r2)) if expected_r1 == r1 && expected_r2 == r2 => {}
+        (Some(expected_r1), Some(expected_r2)) => {
+            let _ = fs::remove_file(&r1_tmp);
+            let _ = fs::remove_file(&r2_tmp);
+            return Err(format!(
+                "xtask fetch-data: {} {} digest mismatch: got r1={} r2={}, expected r1={} r2={}",
+                dataset.id, pair.role, r1, r2, expected_r1, expected_r2
+            )
+            .into());
+        }
+        _ => {}
+    }
+    fs::rename(r1_tmp, &r1_path)?;
+    fs::rename(r2_tmp, &r2_path)?;
+    println!(
+        "xtask fetch-data: {} {} wrote {} read pairs from {} r1_sha256={} r2_sha256={}",
+        dataset.id, pair.role, pair.records, pair.region, r1, r2
+    );
+    Ok(())
+}
+
+fn fetch_truth_file(root: &Path, dataset: &DataSet, truth: &DataTruthFile) -> DynResult<()> {
+    let out_path = root.join(&truth.path);
+    if out_path.exists() {
+        if let Some(bytes) = truth.bytes {
+            let got = fs::metadata(&out_path)?.len();
+            if got == bytes {
+                println!(
+                    "xtask fetch-data: {} truth {} already present ({} bytes)",
+                    dataset.id, truth.role, got
+                );
+                return Ok(());
+            }
+        } else {
+            println!(
+                "xtask fetch-data: {} truth {} already present",
+                dataset.id, truth.role
+            );
+            return Ok(());
+        }
+    }
+    stream_opaque_file(&truth.url, &out_path)?;
+    let got = fs::metadata(&out_path)?.len();
+    if let Some(expected) = truth.bytes {
+        if got != expected {
+            return Err(format!(
+                "xtask fetch-data: {} truth {} byte mismatch: got {}, expected {}",
+                dataset.id, truth.role, got, expected
+            )
+            .into());
+        }
+    }
+    println!(
+        "xtask fetch-data: {} truth {} wrote {} bytes",
+        dataset.id, truth.role, got
+    );
     Ok(())
 }
 
@@ -2243,6 +2918,21 @@ fn stream_reference_fasta(reference: &DataReference, out_path: &Path) -> DynResu
     Ok(())
 }
 
+fn stream_opaque_file(url: &str, out_path: &Path) -> DynResult<()> {
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = out_path.with_extension("tmp");
+    let script = format!("curl -fsSL '{}' > '{}'", url, tmp.display());
+    let status = Command::new("bash").arg("-c").arg(&script).status()?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("fetch failed for {url}").into());
+    }
+    fs::rename(tmp, out_path)?;
+    Ok(())
+}
+
 fn stream_fastq_prefix(source: &DataFile, out_path: &Path, records: usize) -> DynResult<()> {
     let lines = records
         .checked_mul(4)
@@ -2289,6 +2979,96 @@ fn validate_fastq_record_count(path: &Path, expected_records: usize) -> DynResul
         )
         .into());
     }
+    Ok(())
+}
+
+fn validate_paired_fastq_record_count(
+    r1_path: &Path,
+    r2_path: &Path,
+    expected_records: usize,
+) -> DynResult<()> {
+    let r1 = fastq_record_names(r1_path)?;
+    let r2 = fastq_record_names(r2_path)?;
+    if r1.len() != expected_records || r2.len() != expected_records {
+        return Err(format!(
+            "expected {} paired FASTQ records, found {} in {} and {} in {}",
+            expected_records,
+            r1.len(),
+            r1_path.display(),
+            r2.len(),
+            r2_path.display()
+        )
+        .into());
+    }
+    for (idx, (left, right)) in r1.iter().zip(r2.iter()).enumerate() {
+        if left != right {
+            return Err(format!(
+                "paired FASTQ mate name mismatch at record {}: {} vs {}",
+                idx + 1,
+                left,
+                right
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn fastq_record_names(path: &Path) -> DynResult<Vec<String>> {
+    let text = fs::read_to_string(path)?;
+    let mut lines = text.lines();
+    let mut names = Vec::new();
+    while let Some(header) = lines.next() {
+        let seq = lines.next().ok_or("truncated FASTQ sequence line")?;
+        let plus = lines.next().ok_or("truncated FASTQ plus line")?;
+        let qual = lines.next().ok_or("truncated FASTQ quality line")?;
+        if !header.starts_with('@') || !plus.starts_with('+') || seq.len() != qual.len() {
+            return Err(format!("invalid FASTQ record in {}", path.display()).into());
+        }
+        names.push(fastq_core_name(header).to_string());
+    }
+    Ok(names)
+}
+
+fn fastq_core_name(header: &str) -> &str {
+    let name = header
+        .trim_start_matches('@')
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    name.strip_suffix("/1")
+        .or_else(|| name.strip_suffix("/2"))
+        .unwrap_or(name)
+}
+
+fn write_fastq_prefix(input: &Path, output: &Path, records: usize) -> DynResult<()> {
+    let text = fs::read_to_string(input)?;
+    let mut lines = text.lines();
+    let mut out = String::new();
+    for _ in 0..records {
+        let header = lines.next().ok_or_else(|| {
+            format!(
+                "{}: fewer than {} FASTQ records available",
+                input.display(),
+                records
+            )
+        })?;
+        let seq = lines.next().ok_or("truncated FASTQ sequence line")?;
+        let plus = lines.next().ok_or("truncated FASTQ plus line")?;
+        let qual = lines.next().ok_or("truncated FASTQ quality line")?;
+        if !header.starts_with('@') || !plus.starts_with('+') || seq.len() != qual.len() {
+            return Err(format!("invalid FASTQ record in {}", input.display()).into());
+        }
+        out.push_str(header);
+        out.push('\n');
+        out.push_str(seq);
+        out.push('\n');
+        out.push_str(plus);
+        out.push('\n');
+        out.push_str(qual);
+        out.push('\n');
+    }
+    fs::write(output, out)?;
     Ok(())
 }
 
@@ -2685,5 +3465,29 @@ parental_references = [
             status.failed_layer.as_deref(),
             Some("required_tool:definitely_missing_trex_tool")
         );
+    }
+
+    #[test]
+    fn fastq_core_name_normalizes_pair_suffixes() {
+        assert_eq!(fastq_core_name("@read/1 extra"), "read");
+        assert_eq!(fastq_core_name("@read/2"), "read");
+        assert_eq!(
+            fastq_core_name("@HISEQ1:26:HA2RRADXX:1:2203"),
+            "HISEQ1:26:HA2RRADXX:1:2203"
+        );
+    }
+
+    #[test]
+    fn parse_region_accepts_1_based_closed_coordinates() {
+        assert_eq!(
+            parse_region("chr20:10,000,000-10,010,000").expect("region"),
+            GenomicRegion {
+                contig: "chr20".to_string(),
+                start: 10_000_000,
+                end: 10_010_000,
+            }
+        );
+        assert!(parse_region("chr20:0-10").is_err());
+        assert!(parse_region("chr20:20-10").is_err());
     }
 }

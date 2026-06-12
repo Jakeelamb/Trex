@@ -1,61 +1,94 @@
-# Literature-informed assembler framework.
+# Literature-informed Illumina assembler framework.
 # Validated by `cargo run -p xtask -- validate-framework`.
 
 schema_version = 1
 
 [[modules]]
-id = "evidence_ledger"
+id = "read_correction_trust"
 phase = "phase2_illumina"
 status = "planned"
-summary = "Typed, scored evidence records that must exist before graph mutation or post-assembly correction."
+summary = "Read correction and trusted k-mer model that separates sequencing noise from graph evidence before topology is built."
 papers = [
-  "literature/papers/2016-lin-abruijn-long-error-prone-dbg.pdf",
-  "literature/papers/2017-koren-canu.pdf",
-  "literature/papers/2017-wick-unicycler.pdf",
+  "literature/papers/2017-nurk-metaspades.pdf",
+  "literature/papers/2020-rhie-merqury.pdf",
   "literature/papers/2014-walker-pilon.pdf",
 ]
 current_files = [
+  "trex/src/illumina/preprocess.rs",
   "trex/src/illumina/counts.rs",
-  "trex/src/illumina/mate.rs",
-  "xtask/src/main.rs",
+  "trex/src/kmer.rs",
+]
+promotion_stages = [
+  "report_only_candidate",
 ]
 gates = [
-  "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json",
+  "cargo test -p trex illumina::counts",
+  "cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json",
 ]
 next_work = [
-  "Add bridge candidate records before adding mate-derived new edges.",
-  "Emit evidence counts into benchmark JSON.",
+  "Add trusted k-mer diagnostics that can explain why reads or k-mers were excluded.",
+  "Keep correction report-only until read-vs-assembly quality and regression fixtures prove it improves output.",
 ]
 
 [[modules]]
-id = "graph_ir"
+id = "multi_k_graph_ladder"
 phase = "phase2_illumina"
 status = "active"
-summary = "Canonical trusted Illumina DBG plus graph metadata and future storage adapters."
+summary = "SPAdes-style explicit k ladder that builds candidate graphs independently, scores them, and selects one graph without hidden behavior changes."
 papers = [
-  "literature/papers/2017-koren-canu.pdf",
   "literature/papers/2017-nurk-metaspades.pdf",
+  "literature/papers/2017-wick-unicycler.pdf",
+  "literature/papers/2020-rhie-merqury.pdf",
+]
+current_files = [
+  "trex/src/illumina/multik.rs",
+  "trex/src/illumina/pipeline.rs",
+  "xtask/src/main.rs",
+]
+promotion_stages = [
+  "report_only_candidate",
+]
+gates = [
+  "cargo test -p trex illumina::multik",
+  "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json",
+]
+next_work = [
+  "Add selected-k checkpoint namespacing before enabling resume in ladder mode.",
+  "Keep graph merging deferred until select-one behavior is benchmarked across bacterial and diploid rows.",
+]
+
+[[modules]]
+id = "repeat_annotation"
+phase = "phase2_illumina"
+status = "active"
+summary = "Coverage and topology-derived copy-number and repeat-suspicion annotations that inform policy without directly editing graph topology."
+papers = [
+  "literature/papers/2017-nurk-metaspades.pdf",
+  "literature/papers/2020-rhie-merqury.pdf",
   "literature/papers/2023-li-durbin-t2t-era.pdf",
 ]
 current_files = [
-  "trex/src/dbg/graph.rs",
-  "trex/src/dbg/unitig.rs",
-  "trex/src/dbg/walk.rs",
+  "trex/src/dbg/annotate.rs",
+  "trex/src/illumina/fragmentation.rs",
+  "trex/src/illumina/audit.rs",
+]
+promotion_stages = [
+  "report_only_candidate",
 ]
 gates = [
-  "cargo test -p trex dbg::walk",
-  "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_100k_pairs --out target/benchmarks/ecoli-100k.json",
+  "cargo test -p trex dbg::annotate",
+  "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json",
 ]
 next_work = [
-  "Add copy-number and repeat annotations from node/edge multiplicity.",
-  "Profile sparse or compact graph storage after the 100k row completes in a useful local loop.",
+  "Feed repeat-like unitig labels into simplification decisions as guardrails.",
+  "Add richer endpoint tangle classes before promoting any join across a repeat-suspected endpoint.",
 ]
 
 [[modules]]
 id = "simplification_policy"
 phase = "phase2_illumina"
 status = "active"
-summary = "Policy-driven graph edits for tips, bubbles, diploid branch retention, and future bridge application."
+summary = "Decision-first graph simplification that emits reasons and planned edits before mutation, with repeat and diploid guardrails."
 papers = [
   "literature/papers/2017-nurk-metaspades.pdf",
   "literature/papers/2017-wick-unicycler.pdf",
@@ -65,20 +98,84 @@ current_files = [
   "trex/src/dbg/simplify.rs",
   "trex/src/illumina/pipeline.rs",
 ]
+promotion_stages = [
+  "report_only_candidate",
+  "graph_edit",
+]
 gates = [
   "cargo test -p trex dbg::simplify",
   "bash scripts/phase2_illumina_haplotype_metrics.sh",
 ]
 next_work = [
-  "Return simplification decision summaries before mutating in place.",
-  "Add repeat/copy-number-aware simplification gates.",
+  "Add repeat-aware vetoes to existing tip and bubble decisions before stronger cleanup modes.",
+  "Expose policy-mode summaries in benchmark JSON before changing default graph edits.",
+]
+
+[[modules]]
+id = "mate_evidence"
+phase = "phase2_illumina"
+status = "active"
+summary = "Paired-end orientation, insert-distance, and support evidence that ranks bridges without directly adding DBG edges."
+papers = [
+  "literature/papers/2017-wick-unicycler.pdf",
+  "literature/papers/2014-walker-pilon.pdf",
+  "literature/papers/2017-nurk-metaspades.pdf",
+]
+current_files = [
+  "trex/src/evidence.rs",
+  "trex/src/illumina/mate.rs",
+  "trex/src/illumina/scaffold.rs",
+]
+promotion_stages = [
+  "report_only_candidate",
+  "scaffold_artifact",
+]
+gates = [
+  "cargo test -p trex illumina::mate",
+  "cargo run -p xtask -- bench --tier manual --row ecoli_mg1655_srr001666_10k_pairs --out target/benchmarks/ecoli-10k.json",
+]
+next_work = [
+  "Add orientation and distance confidence fields to endpoint join records.",
+  "Reject conflicting mate clusters before any path/scaffold promotion.",
+]
+
+[[modules]]
+id = "promotion_policy"
+phase = "phase2_illumina"
+status = "planned"
+summary = "Explicit rules that convert accumulated evidence into report-only records, scaffold artifacts, GFA paths, FASTA scaffolds, graph edits, or polishing edits."
+papers = [
+  "literature/papers/2017-wick-unicycler.pdf",
+  "literature/papers/2014-walker-pilon.pdf",
+  "literature/papers/2020-rhie-merqury.pdf",
+]
+current_files = [
+  "docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md",
+  "trex/src/illumina/scaffold.rs",
+  "trex/src/dbg/export.rs",
+]
+promotion_stages = [
+  "report_only_candidate",
+  "scaffold_artifact",
+  "gfa_path",
+  "fasta_scaffold_with_gaps",
+  "graph_edit",
+  "polishing_edit",
+]
+gates = [
+  "cargo run -p xtask -- validate-framework",
+  "cargo run -p xtask -- gate --tier pr",
+]
+next_work = [
+  "Move scaffold and audit promotion thresholds into one policy surface.",
+  "Require benchmark artifacts before changing any stage that mutates FASTA or graph topology.",
 ]
 
 [[modules]]
 id = "path_scaffold_builder"
 phase = "phase2_illumina"
 status = "active"
-summary = "Converts graph paths and evidence-backed bridges into unitigs, contigs, GFA paths, and future scaffold artifacts."
+summary = "Path and scaffold artifact builder that keeps unitigs, primary contigs, GFA paths, and evidence-backed scaffolds distinct."
 papers = [
   "literature/papers/2017-wick-unicycler.pdf",
   "literature/papers/2017-koren-canu.pdf",
@@ -87,22 +184,82 @@ papers = [
 current_files = [
   "trex/src/dbg/export.rs",
   "trex/src/dbg/walk.rs",
-  "trex/src/illumina/pipeline.rs",
+  "trex/src/illumina/scaffold.rs",
+]
+promotion_stages = [
+  "scaffold_artifact",
+  "gfa_path",
+  "fasta_scaffold_with_gaps",
 ]
 gates = [
   "bash scripts/ref_free_smoke.sh",
   "bash scripts/phase2_illumina_graph_summaries.sh",
 ]
 next_work = [
-  "Keep sequence-only postprocessing out of contigs.fa unless GFA path metadata is updated consistently.",
-  "Add scaffold output only after bridge evidence records exist.",
+  "Promote endpoint joins into scaffold paths only after mate evidence has orientation and distance confidence.",
+  "Keep contigs.fa unchanged until the promotion policy explicitly allows FASTA scaffolds with gaps.",
+]
+
+[[modules]]
+id = "polishing_audit"
+phase = "phase2_illumina"
+status = "active"
+summary = "Pilon-like post-assembly audit loop that reports low support, mate inconsistency, and collapsed-repeat suspicion before any sequence repair."
+papers = [
+  "literature/papers/2014-walker-pilon.pdf",
+  "literature/papers/2020-rhie-merqury.pdf",
+  "literature/papers/2023-li-durbin-t2t-era.pdf",
+]
+current_files = [
+  "trex/src/illumina/audit.rs",
+  "xtask/src/main.rs",
+]
+promotion_stages = [
+  "report_only_candidate",
+  "polishing_edit",
+]
+gates = [
+  "cargo test -p trex illumina::audit",
+  "cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_1k_pairs --out target/benchmarks/yeast-btt.json",
+]
+next_work = [
+  "Add read-placement support classes before implementing any correction.",
+  "Require before/after k-mer quality artifacts for every polishing edit.",
+]
+
+[[modules]]
+id = "diploid_ambiguity"
+phase = "phase2_illumina"
+status = "active"
+summary = "Diploid-aware ambiguity handling that labels retained alternatives and parent-specific evidence without claiming full haplotype FASTA."
+papers = [
+  "literature/papers/2023-li-durbin-t2t-era.pdf",
+  "literature/papers/2020-rhie-merqury.pdf",
+  "literature/papers/2017-nurk-metaspades.pdf",
+]
+current_files = [
+  "trex/src/illumina/diploid.rs",
+  "trex/src/illumina/phase2_primary.rs",
+  "trex/src/dbg/export.rs",
+]
+promotion_stages = [
+  "report_only_candidate",
+  "gfa_path",
+]
+gates = [
+  "bash scripts/phase2_illumina_haplotype_metrics.sh",
+  "cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_10k_pairs --out target/benchmarks/yeast-btt-10k.json",
+]
+next_work = [
+  "Label retained heterozygous bubbles when parent-specific k-mers support alternatives.",
+  "Report balance and ambiguity metrics without promising haplotype-resolved FASTA.",
 ]
 
 [[modules]]
 id = "assembly_quality"
 phase = "phase2_illumina"
 status = "active"
-summary = "Reference-free and reference-backed quality metrics with machine-readable artifacts."
+summary = "Reference-free and reference-backed quality gates that make every assembler claim falsifiable through JSON artifacts and benchmark rows."
 papers = [
   "literature/papers/2020-rhie-merqury.pdf",
   "literature/papers/2014-walker-pilon.pdf",
@@ -113,20 +270,23 @@ current_files = [
   "scripts/reference_quast.sh",
   "tools/benchmark_matrix.toml",
 ]
+promotion_stages = [
+  "report_only_candidate",
+]
 gates = [
   "cargo run -p xtask -- validate",
-  "TREX_RUN_QUAST=1 cargo run -p xtask -- bench --tier manual --row yeast_btt_err1308583_diploid_1k_pairs --out target/benchmarks/yeast-btt-quast.json",
+  "cargo run -p xtask -- gate --tier pr",
 ]
 next_work = [
-  "Add Merqury-style read-vs-assembly k-mer QV and completeness.",
-  "Add parent-specific k-mer metrics for diploid rows.",
+  "Add Merqury-style completeness and QV summaries as promotion prerequisites.",
+  "Keep performance claims tied to stored benchmark artifacts, not unit-test timing.",
 ]
 
 [[modules]]
 id = "future_graph_adapters"
 phase = "phase2_deferral"
 status = "deferred"
-summary = "Explicit future adapters for A-Bruijn, overlap/string graph, sparse/minimizer DBG, and long-range phasing evidence."
+summary = "Explicit future adapters for A-Bruijn, overlap/string graph, sparse/minimizer DBG, and long-range phasing evidence outside current Illumina scope."
 papers = [
   "literature/papers/2016-lin-abruijn-long-error-prone-dbg.pdf",
   "literature/papers/2023-li-durbin-t2t-era.pdf",
@@ -134,11 +294,15 @@ papers = [
 current_files = [
   "docs/adr/0001-phase2-deferrals-and-primary-collapse.md",
   "docs/adr/0002-promote-active-scope-to-phase2-illumina-endgame.md",
+  "literature/notes/paper-techniques.md",
+]
+promotion_stages = [
+  "report_only_candidate",
 ]
 gates = [
   "cargo run -p xtask -- validate-framework",
 ]
 next_work = [
   "Do not implement until the Phase-2 deferral ADR is amended.",
-  "Keep literature pressure visible without changing the active Illumina contract.",
+  "Keep non-Illumina assembler lessons visible as adapter pressure rather than hidden scope creep.",
 ]

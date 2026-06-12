@@ -2,136 +2,57 @@
 
 This framework translates the literature archive into Trex modules, seams, and benchmark gates. It does not reopen long-read or hybrid scope by itself; ADR 0001 and ADR 0002 still keep active implementation on the Phase-2 Illumina endgame.
 
-The machine-readable version is [`tools/assembler_framework.toml`](../tools/assembler_framework.toml), validated by `cargo run -p xtask -- validate-framework` and included in `cargo run -p xtask -- validate`.
+The machine-readable contract is [`tools/assembler_framework.toml`](../tools/assembler_framework.toml). The detailed architecture, promotion ladder, data flow, and wave plan live in [`docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md`](ILLUMINA_ASSEMBLER_BLUEPRINT.md). Both are validated by `cargo run -p xtask -- validate-framework` and included in `cargo run -p xtask -- validate`.
 
 ## Literature-Derived Principles
 
-| Principle | Source papers | Trex consequence |
-|-----------|---------------|------------------|
-| Evidence before mutation | Unicycler, Pilon, Canu, ABruijn | Mate links, bridges, corrections, and future long-read paths should be scored evidence records before they edit the graph or FASTA. |
-| Preserve ambiguity structurally | Canu, Unicycler, Li/Durbin | GFA and path artifacts are first-class; a single FASTA must not hide unresolved repeats or haplotype ambiguity. |
-| Coverage is contextual | metaSPAdes, Unicycler, Merqury | Simplification policies must not assume one uniform haploid coverage model. |
-| K-mer set validation is core | Merqury, Li/Durbin | Trex should own read-vs-assembly k-mer quality gates, not rely only on reference alignment. |
-| Graph IR follows evidence scale | ABruijn, Canu, Li/Durbin | Illumina DBG is current; long-read/sparse/repeat graph tracks need explicit adapters. |
+| Principle | Source families | Trex consequence |
+|-----------|-----------------|------------------|
+| Evidence before mutation | Unicycler, Pilon, Canu, ABruijn | Mate links, bridges, corrections, and future long-read paths become scored evidence records before they edit the graph or FASTA. |
+| Preserve ambiguity structurally | Canu, Unicycler, Flye-style graph thinking, Li/Durbin | GFA and path artifacts are first-class; a single FASTA must not hide unresolved repeats or haplotype ambiguity. |
+| Coverage is contextual | SPAdes, metaSPAdes, Unicycler, Merqury | Simplification policies must not assume one uniform haploid coverage model. |
+| K-mer set validation is core | Merqury, T2T-era work | Trex should own read-vs-assembly k-mer quality gates, not rely only on reference alignment. |
+| Promotion must be explicit | Unicycler, Pilon, Merqury | Report-only candidates, scaffold artifacts, GFA paths, FASTA scaffolds, graph edits, and polishing edits are separate claims. |
 | Correctness needs artifacts | Pilon, Merqury, QUAST practice | Every quality claim needs JSON/TSV/GFA/changes artifacts that can be diffed and bisected. |
 
-## Deep Modules To Build
+## Top-Level Modules
 
-### 1. Evidence Ledger (`evidence_ledger`)
+| Module | Status | Responsibility | Promotion stages |
+|--------|--------|----------------|------------------|
+| `read_correction_trust` | Planned | Read correction / trusted k-mer model: ingest diagnostics, canonical counts, trusted thresholds, and future correction candidates. | `report_only_candidate` |
+| `multi_k_graph_ladder` | Active | Explicit SPAdes-style multi-*k* candidate graph build, scoring, and select-one behavior. | `report_only_candidate` |
+| `repeat_annotation` | Active | Repeat-aware graph annotation: node/unitig multiplicity, endpoint class, and repeat suspicion. | `report_only_candidate` |
+| `simplification_policy` | Active | Decision-first simplification for tips, bubbles, repeats, and diploid guardrails. | `report_only_candidate`, `graph_edit` |
+| `mate_evidence` | Active | Mate-pair distance/orientation evidence for existing-edge boosts, endpoint joins, conflicts, and bridge ranking. | `report_only_candidate`, `scaffold_artifact` |
+| `promotion_policy` | Planned | Central policy that converts evidence into behavior through the promotion ladder. | all promotion stages |
+| `path_scaffold_builder` | Active | Scaffold/path promotion surface for unitigs, primary contigs, GFA paths, and scaffold artifacts. | `scaffold_artifact`, `gfa_path`, `fasta_scaffold_with_gaps` |
+| `polishing_audit` | Active | Pilon-like audit loop that reports low support, mate disagreement, and repeat-collapse suspicion before sequence repair. | `report_only_candidate`, `polishing_edit` |
+| `diploid_ambiguity` | Active | Diploid ambiguity handling: retained alternatives, parent-specific evidence, and claim-boundary metrics. | `report_only_candidate`, `gfa_path` |
+| `assembly_quality` | Active | Quality gates and benchmark claims with machine-readable artifacts and explicit claim levels. | `report_only_candidate` |
+| `future_graph_adapters` | Deferred | A-Bruijn, overlap/string graph, sparse/minimizer DBG, long-range phasing, and non-Illumina adapter pressure. | `report_only_candidate` |
 
-Interface:
+## Promotion Ladder
 
-- Accept typed evidence: read k-mers, paired-end adjacency, bridge candidates, assembly k-mer quality, future long-read path evidence.
-- Return scored, auditable records.
-- Never directly mutate counts, graph topology, or FASTA.
+The promotion stages are:
 
-Current adapters:
+1. `report_only_candidate`
+2. `scaffold_artifact`
+3. `gfa_path`
+4. `fasta_scaffold_with_gaps`
+5. `graph_edit`
+6. `polishing_edit`
 
-- Trusted k-mer counts in `trex::illumina::counts`.
-- Conservative existing-edge mate boost in `trex::illumina::mate`.
-- Reference-quality metrics in `xtask`.
+Later stages require evidence from earlier stages plus the appropriate tests, docs, changelog entry, and benchmark artifact. Primary `contigs.fa` remains conservative until a promotion stage explicitly allows FASTA changes.
 
-Next work:
+## Wave Build Order
 
-- Add a bridge-candidate record type before allowing mate-derived new edges.
-- Emit evidence summaries into benchmark JSON.
+1. Wave A: commit/checkpoint the current sidecar/evidence stack.
+2. Wave B: add mate orientation and distance confidence.
+3. Wave C: promote high-confidence endpoint joins into scaffold/path artifacts, still without FASTA mutation.
+4. Wave D: connect multi-*k* selection with repeat-aware simplification policy.
+5. Wave E: escalate audit evidence toward read-backed polishing candidates without default repair.
+6. Wave F: deepen diploid ambiguity output and parent-specific graph evidence without full haplotype FASTA claims.
 
-### 2. Graph IR (`graph_ir`)
+## Immediate Build Bias
 
-Interface:
-
-- Own graph vertices, edges, multiplicity, path compression, and graph invariants.
-- Hide storage choices behind graph operations.
-- Preserve enough metadata for unitigs, contigs, paths, and quality gates.
-
-Current adapter:
-
-- Canonical Illumina DBG in `trex::dbg::graph::DbgGraph`.
-
-Next work:
-
-- Add copy-number/repeat annotations derived from node and edge multiplicity.
-- Investigate compact/sparse storage once the 100k E. coli row is fast enough to profile cleanly.
-
-### 3. Simplification Policy (`simplification_policy`)
-
-Interface:
-
-- Take graph plus evidence summaries.
-- Return graph edits plus an audit trail.
-- Encode mode-specific thresholds explicitly.
-
-Current adapters:
-
-- Tip clipping.
-- Bounded diamond bubble collapse.
-- Diploid near-balanced diamond retention.
-
-Next work:
-
-- Split simplification decisions from mutation.
-- Add repeat/copy-number-aware decisions before adding aggressive bridge application.
-
-### 4. Path And Scaffold Builder (`path_scaffold_builder`)
-
-Interface:
-
-- Convert graph paths and evidence-backed bridges into outputs.
-- Keep contigs, scaffolds, unitigs, and unresolved graph paths distinct.
-- Maintain GFA/FASTA identity consistency.
-
-Current adapters:
-
-- Unitig extraction.
-- Reference contig walks.
-- GFA `S` / `L` / representable `P` export.
-
-Next work:
-
-- Add a scaffold artifact only after bridge evidence exists.
-- Keep sequence-only postprocessing out of `contigs.fa` unless path metadata can be updated consistently.
-
-### 5. Assembly Quality Module (`assembly_quality`)
-
-Interface:
-
-- Compute reference-free and reference-backed quality metrics.
-- Emit machine-readable artifacts.
-- Keep accuracy, completeness, phasing, and continuity separate.
-
-Current adapters:
-
-- `xtask bench` FASTQ/FASTA/GFA metrics.
-- Reference k-mer containment.
-- Optional QUAST.
-
-Next work:
-
-- Add Merqury-style read-vs-assembly k-mer metrics.
-- Add parent-specific k-mer metrics for diploid rows.
-- Add a report artifact for collapsed-repeat suspicion instead of treating short contigs as merely cosmetic.
-
-### 6. Future Graph Adapters (`future_graph_adapters`)
-
-Interface:
-
-- Convert non-Illumina evidence into graph/path forms without changing the active Illumina contract.
-
-Deferred adapters:
-
-- A-Bruijn / landmark graph for noisy long reads.
-- Overlap/string graph for accurate long reads.
-- Sparse/minimizer DBG for memory-heavy large genomes.
-- Long-range phasing/scaffolding adapters for Hi-C/Pore-C/trio data.
-
-These are tracked as architecture pressure, not current implementation scope.
-
-## Immediate Build Order
-
-1. **Quality module:** add read-vs-assembly k-mer metrics to `xtask bench`.
-2. **Evidence ledger:** represent mate/bridge candidates without mutating graph topology.
-3. **Simplification audit:** return decisions and counts from tip/bubble passes.
-4. **Graph metadata:** add copy-number/repeat annotations.
-5. **Scaffold artifact:** emit scaffold paths only when backed by evidence records.
-
-The order is deliberate: without quality gates and evidence records, graph edits are not falsifiable.
+Work should happen in large, evidence-gated waves instead of isolated feature drips. Each wave should add the minimum durable data types, unit tests, sidecar outputs, and validator coverage needed for the next promotion stage.

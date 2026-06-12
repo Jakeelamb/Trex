@@ -6,6 +6,7 @@ pub mod counts;
 pub mod diploid;
 pub mod fasta;
 pub mod fastq;
+pub mod fragmentation;
 pub mod io;
 pub mod mate;
 pub mod multik;
