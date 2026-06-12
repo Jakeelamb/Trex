@@ -1,26 +1,40 @@
 //! End-to-end **Illumina** preprocess → *k*-mer counts → trusted DBG → simplify → unitigs → contigs → exports.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
+use serde::Serialize;
 use tracing::instrument;
 
 use crate::dbg::{
-    assert_no_self_loops, build_dbg, extract_unitigs, forward_representatives,
-    primary_contig_paths_for_gfa, reference_contig_paths, remove_diamond_bubbles_ext, remove_tips,
-    stitch_sequence, unitig_adjacency_links, write_contigs_fasta, write_gfa1, write_unitigs_fasta,
-    ContigWalkTieBreak, DiploidSimplifyMode, SimplifyParams,
+    annotate_graph, assert_no_self_loops, build_dbg, extract_unitigs, forward_representatives,
+    primary_contig_paths_for_gfa, reference_contig_paths,
+    remove_diamond_bubbles_ext_with_decisions, remove_tips_with_decisions, stitch_sequence,
+    unitig_adjacency_links, write_contigs_fasta, write_gfa1, write_unitigs_fasta,
+    ContigWalkTieBreak, DbgGraph, DiploidSimplifyMode, GfaWriteOptions, GraphAnnotations,
+    SimplifyDecisionLog, SimplifyParams, SimplifyStats,
 };
 use crate::error::{GraphError, IngestError, TrexError};
+use crate::evidence::EvidenceLedger;
+use crate::illumina::audit::{audit_assembly, audit_tsv, AssemblyAuditReport};
 use crate::illumina::checkpoint::{self, CheckpointRoot, GraphCheckpointIdentity};
 use crate::illumina::counts::enumerate_sorted_counts;
+use crate::illumina::diploid::{
+    build_diploid_evidence, gfa_path_tags, gfa_unitig_tags, DiploidEvidenceReport,
+    ParentReferenceParams,
+};
 use crate::illumina::fasta::parse_fasta;
 use crate::illumina::fastq::parse_fastq;
 use crate::illumina::io::read_maybe_gzip;
 use crate::illumina::mate;
+use crate::illumina::multik::{select_k, MultiKParams, MultiKSelectionReport};
 use crate::illumina::paired::validate_pair_parity;
 use crate::illumina::phase2_primary;
 use crate::illumina::read::Read;
+use crate::illumina::scaffold::{build_scaffold_artifact, ScaffoldArtifact};
 use crate::kmer::apply_trusted_threshold;
 
 type SequenceRecords = Vec<(String, Vec<u8>)>;
@@ -70,6 +84,70 @@ impl AssembleOutputs {
     pub fn gfa_path_resolved(&self) -> PathBuf {
         self.resolve(&self.gfa_path)
     }
+
+    pub fn evidence_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("evidence.json"))
+        }
+    }
+
+    pub fn annotations_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("annotations.json"))
+        }
+    }
+
+    pub fn simplification_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("simplification.json"))
+        }
+    }
+
+    pub fn scaffolds_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("scaffolds.json"))
+        }
+    }
+
+    pub fn multi_k_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("multi_k.json"))
+        }
+    }
+
+    pub fn audit_json_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("audit.json"))
+        }
+    }
+
+    pub fn audit_tsv_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("audit.tsv"))
+        }
+    }
+
+    pub fn diploid_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("diploid.json"))
+        }
+    }
 }
 
 /// Optional overrides for **Phase-1 graph simplification** (tips + bounded diamond bubbles).
@@ -110,6 +188,59 @@ fn merge_simplify_params(k: usize, overrides: &SimplifyOverrides) -> SimplifyPar
     p
 }
 
+fn apply_graph_simplification_with_decisions(
+    graph: &mut DbgGraph,
+    simplify_params: &SimplifyParams,
+    diploid_simplify: Option<DiploidSimplifyMode>,
+) -> (SimplifyStats, SimplifyDecisionLog) {
+    let (tips_removed, tip_decisions) = remove_tips_with_decisions(graph, simplify_params);
+    let mut stats = SimplifyStats {
+        tips_removed,
+        ..SimplifyStats::default()
+    };
+    let (diamond_stats, diamond_decisions) =
+        remove_diamond_bubbles_ext_with_decisions(graph, simplify_params, diploid_simplify);
+    stats.diamond_bubbles_resolved += diamond_stats.diamond_bubbles_resolved;
+    stats.diploid_diamonds_retained += diamond_stats.diploid_diamonds_retained;
+    stats.ambiguous_k22_diamonds_skipped += diamond_stats.ambiguous_k22_diamonds_skipped;
+    (
+        stats,
+        SimplifyDecisionLog {
+            tips: tip_decisions,
+            diamonds: diamond_decisions,
+        },
+    )
+}
+
+fn apply_phase2_mate_bridge(
+    graph: &mut DbgGraph,
+    reads: &[Read],
+    paired_r1_len: Option<usize>,
+    k: usize,
+    enabled: bool,
+) -> Option<mate::MateBridgeStats> {
+    if !enabled {
+        return None;
+    }
+    let Some(n) = paired_r1_len else {
+        tracing::warn!(
+            "Phase-2 mate bridge skipped: missing preprocess/pair_layout.json; re-run without --resume to record paired layout"
+        );
+        return None;
+    };
+
+    let stats = mate::boost_mate_pairs_on_existing_dbg_edges(graph, reads, n, k);
+    tracing::info!(
+        pairs_seen = stats.pairs_seen,
+        pairs_with_endpoint_kmers = stats.pairs_with_endpoint_kmers,
+        trusted_endpoint_pairs = stats.trusted_endpoint_pairs,
+        existing_edge_pairs = stats.existing_edge_pairs,
+        boosted_edges = stats.boosted_edges,
+        "Phase-2 Illumina mate-pair bridge evidence (existing DBG edges only)"
+    );
+    Some(stats)
+}
+
 fn stitch_unitigs_and_contigs(
     graph: &crate::dbg::DbgGraph,
     forward: &HashMap<Vec<u8>, Vec<u8>>,
@@ -146,6 +277,8 @@ pub struct DiploidParams {
     /// Reserved for mate-distance–aware simplification; stored in graph checkpoints for resume identity.
     pub insert_mean_bp: Option<u64>,
     pub insert_stddev_bp: Option<u64>,
+    /// Optional parent references used only for evidence/reporting; they do not change graph shape.
+    pub parent_references: ParentReferenceParams,
 }
 
 /// Parameters for the current **Phase-1** `assemble` slice (ingest → counts → DBG → exports).
@@ -161,6 +294,7 @@ pub struct AssembleParams {
     pub strict_checkpoints: bool,
     pub simplify: SimplifyOverrides,
     pub diploid: DiploidParams,
+    pub multi_k: MultiKParams,
     pub outputs: AssembleOutputs,
 }
 
@@ -170,6 +304,15 @@ pub struct AssembleResult {
     pub reads: Vec<Read>,
     pub trusted_kmers: Vec<(Vec<u8>, u64)>,
     pub total_unique_kmers: usize,
+    pub multi_k_selection: MultiKSelectionReport,
+    pub simplify_stats: SimplifyStats,
+    pub simplify_decisions: SimplifyDecisionLog,
+    pub evidence: EvidenceLedger,
+    pub graph_annotations: GraphAnnotations,
+    pub scaffold_artifact: ScaffoldArtifact,
+    pub audit_report: AssemblyAuditReport,
+    pub diploid_evidence: DiploidEvidenceReport,
+    pub mate_bridge_stats: Option<mate::MateBridgeStats>,
     pub unitig_count: usize,
     pub contig_count: usize,
     pub outputs: AssembleOutputs,
@@ -217,8 +360,12 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         load_reads(params)?
     };
 
+    if params.multi_k.enabled() && params.checkpoint_root.is_some() {
+        return Err(IngestError::MultiKCheckpointUnsupported.into());
+    }
+
     if let Some(s) = Read::shortest_length(&reads) {
-        if s < params.k {
+        if !params.multi_k.enabled() && s < params.k {
             return Err(IngestError::KTooLarge {
                 k: params.k,
                 shortest: s,
@@ -227,6 +374,17 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         }
     } else {
         return Err(IngestError::FastqFormat("no reads ingested".into()).into());
+    }
+
+    let multi_k_selection = select_k(&reads, params.k, params.trusted_threshold, &params.multi_k)?;
+    let selected_k = multi_k_selection.selected_k;
+    if multi_k_selection.enabled {
+        tracing::info!(
+            requested_k = multi_k_selection.requested_k,
+            selected_k = selected_k,
+            candidates = multi_k_selection.candidates.len(),
+            "multi-k graph selection"
+        );
     }
 
     if let Some(ref c) = ck {
@@ -241,60 +399,59 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
     let merged = if params.resume {
         match &ck {
             Some(c) => {
-                match checkpoint::load_counts_checkpoint(c, params.strict_checkpoints, params.k)? {
+                match checkpoint::load_counts_checkpoint(c, params.strict_checkpoints, selected_k)?
+                {
                     Some(rows) => rows,
-                    None => enumerate_sorted_counts(&reads, params.k)?,
+                    None => enumerate_sorted_counts(&reads, selected_k)?,
                 }
             }
-            None => enumerate_sorted_counts(&reads, params.k)?,
+            None => enumerate_sorted_counts(&reads, selected_k)?,
         }
     } else {
-        enumerate_sorted_counts(&reads, params.k)?
+        enumerate_sorted_counts(&reads, selected_k)?
     };
 
     let total_unique = merged.len();
 
     if let Some(ref c) = ck {
-        checkpoint::write_counts_checkpoint(c, params.k, &merged, params.strict_checkpoints)?;
+        checkpoint::write_counts_checkpoint(c, selected_k, &merged, params.strict_checkpoints)?;
     }
 
     let trusted = apply_trusted_threshold(merged, params.trusted_threshold);
 
-    let forward = forward_representatives(&reads, params.k)?;
-    let simplify_params = merge_simplify_params(params.k, &params.simplify);
+    let forward = forward_representatives(&reads, selected_k)?;
+    let simplify_params = merge_simplify_params(selected_k, &params.simplify);
     let diploid_simplify = params.diploid.enabled.then_some(DiploidSimplifyMode);
     let graph_ck_id = graph_checkpoint_identity(params);
+    let mut simplify_stats = SimplifyStats::default();
+    let mut simplify_decisions = SimplifyDecisionLog::default();
+    let mut mate_bridge_stats = None;
+    let mut evidence = EvidenceLedger::new();
 
     let graph = if let Some(ref c) = ck {
         if params.resume {
             match checkpoint::load_graph_checkpoint(
                 c,
                 params.strict_checkpoints,
-                params.k,
+                selected_k,
                 &graph_ck_id,
             )? {
                 Some(g) => g,
                 None => {
-                    let mut g = build_dbg(&reads, params.k, &trusted)?;
-                    if graph_ck_id.phase2_mate_bridge_v1 {
-                        if let Some(n) = paired_r1_len {
-                            let nb = mate::boost_mate_pairs_on_existing_dbg_edges(
-                                &mut g, &reads, n, params.k,
-                            );
-                            if nb > 0 {
-                                tracing::info!(
-                                    mate_bridge_boosts = nb,
-                                    "Phase-2 Illumina mate-pair edge boosts (existing DBG edges only)"
-                                );
-                            }
-                        } else {
-                            tracing::warn!(
-                                "Phase-2 mate bridge skipped: missing preprocess/pair_layout.json; re-run without --resume to record paired layout"
-                            );
-                        }
-                    }
-                    remove_tips(&mut g, &simplify_params);
-                    remove_diamond_bubbles_ext(&mut g, &simplify_params, diploid_simplify);
+                    let mut g = build_dbg(&reads, selected_k, &trusted)?;
+                    mate_bridge_stats = apply_phase2_mate_bridge(
+                        &mut g,
+                        &reads,
+                        paired_r1_len,
+                        selected_k,
+                        graph_ck_id.phase2_mate_bridge_v1,
+                    );
+                    (simplify_stats, simplify_decisions) =
+                        apply_graph_simplification_with_decisions(
+                            &mut g,
+                            &simplify_params,
+                            diploid_simplify,
+                        );
                     checkpoint::write_graph_checkpoint(
                         c,
                         &g,
@@ -305,51 +462,48 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
                 }
             }
         } else {
-            let mut g = build_dbg(&reads, params.k, &trusted)?;
-            if graph_ck_id.phase2_mate_bridge_v1 {
-                if let Some(n) = paired_r1_len {
-                    let nb =
-                        mate::boost_mate_pairs_on_existing_dbg_edges(&mut g, &reads, n, params.k);
-                    if nb > 0 {
-                        tracing::info!(
-                            mate_bridge_boosts = nb,
-                            "Phase-2 Illumina mate-pair edge boosts (existing DBG edges only)"
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        "Phase-2 mate bridge skipped: missing preprocess/pair_layout.json; re-run without --resume to record paired layout"
-                    );
-                }
-            }
-            remove_tips(&mut g, &simplify_params);
-            remove_diamond_bubbles_ext(&mut g, &simplify_params, diploid_simplify);
+            let mut g = build_dbg(&reads, selected_k, &trusted)?;
+            mate_bridge_stats = apply_phase2_mate_bridge(
+                &mut g,
+                &reads,
+                paired_r1_len,
+                selected_k,
+                graph_ck_id.phase2_mate_bridge_v1,
+            );
+            (simplify_stats, simplify_decisions) = apply_graph_simplification_with_decisions(
+                &mut g,
+                &simplify_params,
+                diploid_simplify,
+            );
             checkpoint::write_graph_checkpoint(c, &g, params.strict_checkpoints, &graph_ck_id)?;
             g
         }
     } else {
-        let mut g = build_dbg(&reads, params.k, &trusted)?;
-        if graph_ck_id.phase2_mate_bridge_v1 {
-            if let Some(n) = paired_r1_len {
-                let nb = mate::boost_mate_pairs_on_existing_dbg_edges(&mut g, &reads, n, params.k);
-                if nb > 0 {
-                    tracing::info!(
-                        mate_bridge_boosts = nb,
-                        "Phase-2 Illumina mate-pair edge boosts (existing DBG edges only)"
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    "Phase-2 mate bridge skipped: missing preprocess/pair_layout.json; re-run without --resume to record paired layout"
-                );
-            }
-        }
-        remove_tips(&mut g, &simplify_params);
-        remove_diamond_bubbles_ext(&mut g, &simplify_params, diploid_simplify);
+        let mut g = build_dbg(&reads, selected_k, &trusted)?;
+        mate_bridge_stats = apply_phase2_mate_bridge(
+            &mut g,
+            &reads,
+            paired_r1_len,
+            selected_k,
+            graph_ck_id.phase2_mate_bridge_v1,
+        );
+        (simplify_stats, simplify_decisions) =
+            apply_graph_simplification_with_decisions(&mut g, &simplify_params, diploid_simplify);
         g
     };
 
+    if let Some(stats) = mate_bridge_stats.as_ref() {
+        evidence.push(stats.evidence_record());
+    }
+
     assert_no_self_loops(&graph)?;
+    tracing::info!(
+        tips_removed = simplify_stats.tips_removed,
+        diamond_bubbles_resolved = simplify_stats.diamond_bubbles_resolved,
+        diploid_diamonds_retained = simplify_stats.diploid_diamonds_retained,
+        ambiguous_k22_diamonds_skipped = simplify_stats.ambiguous_k22_diamonds_skipped,
+        "graph simplification decisions"
+    );
 
     if params.diploid.enabled {
         tracing::info!(
@@ -367,46 +521,147 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         ContigWalkTieBreak::Phase1Lex
     };
 
+    let stage_start = Instant::now();
     let (unitig_records, mut contig_records, unitig_paths, contig_paths) =
         match (&ck, params.resume) {
             (Some(c), true) => {
-                match checkpoint::load_export_checkpoint(c, params.strict_checkpoints, params.k)? {
+                match checkpoint::load_export_checkpoint(c, params.strict_checkpoints, selected_k)?
+                {
                     Some((ur, cr)) => {
                         let up = extract_unitigs(&graph);
                         let cp =
-                            reference_contig_paths(&graph, &forward, params.k, contig_tie_break)?;
+                            reference_contig_paths(&graph, &forward, selected_k, contig_tie_break)?;
                         (ur, cr, up, cp)
                     }
                     None => {
-                        stitch_unitigs_and_contigs(&graph, &forward, params.k, contig_tie_break)?
+                        stitch_unitigs_and_contigs(&graph, &forward, selected_k, contig_tie_break)?
                     }
                 }
             }
-            _ => stitch_unitigs_and_contigs(&graph, &forward, params.k, contig_tie_break)?,
+            _ => stitch_unitigs_and_contigs(&graph, &forward, selected_k, contig_tie_break)?,
         };
+    tracing::info!(
+        stage = "stitch_unitigs_and_contigs",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        unitigs = unitig_records.len(),
+        contigs = contig_records.len(),
+        "illumina pipeline stage complete"
+    );
 
     if params.diploid.enabled {
+        let stage_start = Instant::now();
         let trusted_map: HashMap<Vec<u8>, u64> = trusted.iter().cloned().collect();
         for (_hdr, seq) in contig_records.iter_mut() {
-            phase2_primary::collapse_primary_contig_by_trusted_kmers(seq, params.k, &trusted_map);
+            phase2_primary::collapse_primary_contig_by_trusted_kmers(seq, selected_k, &trusted_map);
         }
         tracing::info!(
+            elapsed_ms = stage_start.elapsed().as_millis(),
             "Phase-2 Illumina: primary contig FASTA column collapse applied (trusted k-mer multiplicity)"
         );
     }
 
+    let stage_start = Instant::now();
     let primary_contig_paths_gfa = primary_contig_paths_for_gfa(&contig_paths, &unitig_paths);
+    tracing::info!(
+        stage = "primary_contig_paths_for_gfa",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        gfa_paths = primary_contig_paths_gfa.len(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
+    let scaffold_artifact = build_scaffold_artifact(
+        mate_bridge_stats
+            .as_ref()
+            .map(|stats| stats.candidates.as_slice())
+            .unwrap_or(&[]),
+        &unitig_paths,
+        selected_k,
+    );
+    tracing::info!(
+        stage = "build_scaffold_artifact",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        scaffold_paths = scaffold_artifact.paths.len(),
+        bridge_candidates = scaffold_artifact.bridge_candidates.len(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
+    let graph_annotations = annotate_graph(&graph, &unitig_paths);
+    tracing::info!(
+        stage = "annotate_graph",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
+    let diploid_evidence = build_diploid_evidence(
+        params.diploid.enabled,
+        selected_k,
+        &params.diploid.parent_references,
+        &unitig_paths,
+        &contig_records,
+    )?;
+    tracing::info!(
+        stage = "build_diploid_evidence",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        parent_informative_unitigs = diploid_evidence.summary.parent_informative_unitigs,
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
+    let audit_report = audit_assembly(
+        selected_k,
+        &contig_records,
+        &trusted,
+        &graph_annotations,
+        mate_bridge_stats.as_ref(),
+    );
+    tracing::info!(
+        stage = "audit_assembly",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        audit_findings = audit_report.findings.len(),
+        "illumina pipeline stage complete"
+    );
+    tracing::info!(
+        baseline_multiplicity = graph_annotations.summary.baseline_multiplicity,
+        high_copy_nodes = graph_annotations.summary.high_copy_nodes,
+        repeat_suspected_nodes = graph_annotations.summary.repeat_suspected_nodes,
+        repeat_suspected_unitigs = graph_annotations.summary.repeat_suspected_unitigs,
+        "graph copy-number and repeat annotations"
+    );
+    tracing::info!(
+        audit_findings = audit_report.findings.len(),
+        low_support_kmers = audit_report.summary.low_support_kmers,
+        low_support_regions = audit_report.summary.low_support_regions,
+        abnormal_pair_hints = audit_report.summary.abnormal_pair_hints,
+        collapsed_repeat_suspicions = audit_report.summary.collapsed_repeat_suspicions,
+        "post-assembly audit report"
+    );
+    if params.diploid.enabled {
+        tracing::info!(
+            parent_refs = diploid_evidence.summary.parent_references_supplied,
+            parent1_only_nodes = diploid_evidence.summary.parent1_only_nodes,
+            parent2_only_nodes = diploid_evidence.summary.parent2_only_nodes,
+            mixed_unitigs = diploid_evidence.summary.mixed_unitigs,
+            full_haplotype_fasta_claimed = diploid_evidence.summary.full_haplotype_fasta_claimed,
+            "diploid parent-specific k-mer evidence"
+        );
+    }
 
     if let Some(ref c) = ck {
+        let stage_start = Instant::now();
         checkpoint::write_export_checkpoint(
             c,
-            params.k,
+            selected_k,
             &unitig_records,
             &contig_records,
             params.strict_checkpoints,
         )?;
+        tracing::info!(
+            stage = "write_export_checkpoint",
+            elapsed_ms = stage_start.elapsed().as_millis(),
+            "illumina pipeline stage complete"
+        );
     }
 
+    let stage_start = Instant::now();
     if params.outputs.out_dir.as_os_str() != "-" {
         std::fs::create_dir_all(&params.outputs.out_dir)
             .map_err(|e| TrexError::from(GraphError::from(e)))?;
@@ -427,31 +682,160 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
             }
         }
     }
+    tracing::info!(
+        stage = "prepare_output_directories",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        "illumina pipeline stage complete"
+    );
 
+    let stage_start = Instant::now();
     write_unitigs_fasta(&uf, &unitig_records)?;
+    tracing::info!(
+        stage = "write_unitigs_fasta",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
     write_contigs_fasta(&cf, &contig_records)?;
+    tracing::info!(
+        stage = "write_contigs_fasta",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
     let diploid_gfa_links = if params.diploid.enabled {
         Some(unitig_adjacency_links(&graph, &unitig_paths))
     } else {
         None
     };
+    let parent_unitig_tags = gfa_unitig_tags(&diploid_evidence);
+    let parent_path_tags = gfa_path_tags(&diploid_evidence);
+    tracing::info!(
+        stage = "prepare_gfa_metadata",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        diploid_links = diploid_gfa_links
+            .as_ref()
+            .map(|links| links.len())
+            .unwrap_or(0),
+        parent_unitig_tags = parent_unitig_tags.len(),
+        parent_path_tags = parent_path_tags.len(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
     write_gfa1(
         &gf,
         &unitig_records,
-        params.diploid.enabled,
-        diploid_gfa_links.as_deref(),
-        &primary_contig_paths_gfa,
-        params.diploid.enabled,
+        GfaWriteOptions {
+            phase2_illumina_diploid: params.diploid.enabled,
+            diploid_unitig_links: diploid_gfa_links.as_deref(),
+            primary_contig_paths: &primary_contig_paths_gfa,
+            phase2_unphased_hap_paths: params.diploid.enabled,
+            parent_unitig_tags: Some(parent_unitig_tags.as_slice()),
+            parent_path_tags: Some(parent_path_tags.as_slice()),
+        },
     )?;
+    tracing::info!(
+        stage = "write_gfa1",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        "illumina pipeline stage complete"
+    );
+    let stage_start = Instant::now();
+    write_evidence_json(&params.outputs.evidence_path(), &evidence)?;
+    write_annotations_json(&params.outputs.annotations_path(), &graph_annotations)?;
+    write_simplification_json(&params.outputs.simplification_path(), &simplify_decisions)?;
+    write_scaffolds_json(&params.outputs.scaffolds_path(), &scaffold_artifact)?;
+    write_multi_k_json(&params.outputs.multi_k_path(), &multi_k_selection)?;
+    write_audit_json(&params.outputs.audit_json_path(), &audit_report)?;
+    write_audit_tsv(&params.outputs.audit_tsv_path(), &audit_report)?;
+    write_diploid_json(&params.outputs.diploid_path(), &diploid_evidence)?;
+    tracing::info!(
+        stage = "write_json_sidecars",
+        elapsed_ms = stage_start.elapsed().as_millis(),
+        "illumina pipeline stage complete"
+    );
 
     Ok(AssembleResult {
         reads,
         trusted_kmers: trusted,
         total_unique_kmers: total_unique,
+        multi_k_selection,
+        simplify_stats,
+        simplify_decisions,
+        evidence,
+        graph_annotations,
+        scaffold_artifact,
+        audit_report,
+        diploid_evidence,
+        mate_bridge_stats,
         unitig_count: unitig_records.len(),
         contig_count: contig_records.len(),
         outputs: params.outputs.clone(),
     })
+}
+
+fn write_evidence_json(path: &Path, evidence: &EvidenceLedger) -> Result<(), TrexError> {
+    write_json_pretty(path, evidence)
+}
+
+fn write_annotations_json(path: &Path, annotations: &GraphAnnotations) -> Result<(), TrexError> {
+    write_json_pretty(path, annotations)
+}
+
+fn write_simplification_json(
+    path: &Path,
+    decisions: &SimplifyDecisionLog,
+) -> Result<(), TrexError> {
+    write_json_pretty(path, decisions)
+}
+
+fn write_scaffolds_json(path: &Path, artifact: &ScaffoldArtifact) -> Result<(), TrexError> {
+    write_json_pretty(path, artifact)
+}
+
+fn write_multi_k_json(path: &Path, selection: &MultiKSelectionReport) -> Result<(), TrexError> {
+    if !selection.enabled || path.as_os_str() == "-" {
+        return Ok(());
+    }
+    write_json_pretty(path, selection)
+}
+
+fn write_audit_json(path: &Path, report: &AssemblyAuditReport) -> Result<(), TrexError> {
+    write_json_pretty(path, report)
+}
+
+fn write_audit_tsv(path: &Path, report: &AssemblyAuditReport) -> Result<(), TrexError> {
+    if path.as_os_str() == "-" {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| TrexError::Graph(GraphError::Io(e)))?;
+        }
+    }
+    std::fs::write(path, audit_tsv(report)).map_err(|e| TrexError::Graph(GraphError::Io(e)))?;
+    Ok(())
+}
+
+fn write_diploid_json(path: &Path, report: &DiploidEvidenceReport) -> Result<(), TrexError> {
+    write_json_pretty(path, report)
+}
+
+fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<(), TrexError> {
+    if path.as_os_str() == "-" {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| TrexError::Graph(GraphError::Io(e)))?;
+        }
+    }
+    let file = File::create(path).map_err(|e| TrexError::Graph(GraphError::Io(e)))?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value).map_err(|e| TrexError::Graph(e.into()))?;
+    writer
+        .flush()
+        .map_err(|e| TrexError::Graph(GraphError::Io(e)))?;
+    Ok(())
 }
 
 fn load_reads(params: &AssembleParams) -> Result<(Vec<Read>, Option<usize>), TrexError> {

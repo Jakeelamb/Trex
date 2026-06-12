@@ -197,23 +197,28 @@ fn stitch_from(
     k: usize,
     mut cur: Vec<u8>,
 ) -> Result<Vec<u8>, GraphError> {
-    let mut seq = cur.clone();
+    let mut seq = Vec::with_capacity(k + path.len().saturating_sub(1));
+    seq.extend_from_slice(&cur);
     for cn in &path[1..] {
         let cand = pick_forward(cn.as_slice(), forward)?;
         let rc_c = reverse_complement(&cand);
-        let mut opts: Vec<Vec<u8>> = Vec::new();
-        if cur[1..] == cand[..k - 1] {
-            opts.push(cand.clone());
+        let direct_ok = cur[1..] == cand[..k - 1];
+        let rc_ok = cand != rc_c && cur[1..] == rc_c[..k - 1];
+        let use_c = match (direct_ok, rc_ok) {
+            (true, false) => cand,
+            (false, true) => rc_c,
+            (true, true) => {
+                if cmp_dna(&cand, &rc_c) == Ordering::Greater {
+                    rc_c
+                } else {
+                    cand
+                }
+            }
+            (false, false) => return Err(GraphError::OrientationConflict),
+        };
+        if let Some(&last) = use_c.last() {
+            seq.push(last);
         }
-        if cand != rc_c && cur[1..] == rc_c[..k - 1] {
-            opts.push(rc_c);
-        }
-        if opts.is_empty() {
-            return Err(GraphError::OrientationConflict);
-        }
-        opts.sort_by(|a, b| cmp_dna(a, b));
-        let use_c = opts.into_iter().next().expect("non-empty");
-        seq.push(*use_c.last().expect("k-mer"));
         cur = use_c;
     }
     Ok(seq)

@@ -1,7 +1,7 @@
 //! **GFA 1.0** and **FASTA** export (**Phase-1 FASTA header policy** / **GFA segment naming**).
 //! Use path **`-`** for **stdout** (per **Phase-1 export layout**).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -63,6 +63,17 @@ pub struct UnitigGfaLink {
     pub to_utg: usize,
     pub to_orient: char,
     pub overlap_cigar: String,
+}
+
+/// Optional **GFA 1.0** annotations that do not affect FASTA output.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GfaWriteOptions<'a> {
+    pub phase2_illumina_diploid: bool,
+    pub diploid_unitig_links: Option<&'a [UnitigGfaLink]>,
+    pub primary_contig_paths: &'a [(String, Vec<(usize, char)>)],
+    pub phase2_unphased_hap_paths: bool,
+    pub parent_unitig_tags: Option<&'a [(usize, String)]>,
+    pub parent_path_tags: Option<&'a [(String, String)]>,
 }
 
 /// Build sorted, deduplicated **`L`** link rows (`+` / `+` only in v1) from unitig vertex paths.
@@ -190,6 +201,88 @@ pub fn contig_path_partition_full_unitigs(
     Some(out)
 }
 
+struct UnitigPathIndex {
+    by_first: BTreeMap<Vec<u8>, Vec<usize>>,
+    by_last: BTreeMap<Vec<u8>, Vec<usize>>,
+}
+
+impl UnitigPathIndex {
+    fn new(unitig_paths: &[Vec<Vec<u8>>]) -> Self {
+        let mut by_first: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+        let mut by_last: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+        for (idx, path) in unitig_paths.iter().enumerate() {
+            if let Some(first) = path.first() {
+                by_first.entry(first.clone()).or_default().push(idx);
+            }
+            if let Some(last) = path.last() {
+                by_last.entry(last.clone()).or_default().push(idx);
+            }
+        }
+        Self { by_first, by_last }
+    }
+}
+
+fn contig_path_partition_full_unitigs_indexed(
+    contig_path: &[Vec<u8>],
+    unitig_paths: &[Vec<Vec<u8>>],
+    index: &UnitigPathIndex,
+) -> Option<Vec<(usize, char)>> {
+    if contig_path.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut i = 0usize;
+    let mut out: Vec<(usize, char)> = Vec::new();
+    while i < contig_path.len() {
+        let mut best: Option<(usize, usize, char)> = None;
+
+        if let Some(candidates) = index.by_first.get(&contig_path[i]) {
+            for &u in candidates {
+                let up = &unitig_paths[u];
+                let n = up.len();
+                if i + n <= contig_path.len() && contig_path[i..i + n] == up[..] {
+                    let cand = (i + n, u, '+');
+                    best = Some(match best {
+                        None => cand,
+                        Some(b) => pick_longer_unitig_prefix(b, cand),
+                    });
+                }
+            }
+        }
+
+        if let Some(candidates) = index.by_last.get(&contig_path[i]) {
+            for &u in candidates {
+                let up = &unitig_paths[u];
+                let n = up.len();
+                if i + n > contig_path.len() {
+                    continue;
+                }
+                let mut rev_ok = true;
+                for t in 0..n {
+                    if contig_path[i + t] != up[n - 1 - t] {
+                        rev_ok = false;
+                        break;
+                    }
+                }
+                if rev_ok {
+                    let cand = (i + n, u, '-');
+                    best = Some(match best {
+                        None => cand,
+                        Some(b) => pick_longer_unitig_prefix(b, cand),
+                    });
+                }
+            }
+        }
+
+        let (end, u, o) = best?;
+        if end == i {
+            return None;
+        }
+        out.push((u + 1, o));
+        i = end;
+    }
+    Some(out)
+}
+
 fn pick_longer_unitig_prefix(
     a: (usize, usize, char),
     b: (usize, usize, char),
@@ -223,11 +316,12 @@ pub fn primary_contig_paths_for_gfa(
     contig_paths: &[Vec<Vec<u8>>],
     unitig_paths: &[Vec<Vec<u8>>],
 ) -> Vec<(String, Vec<(usize, char)>)> {
+    let index = UnitigPathIndex::new(unitig_paths);
     contig_paths
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
-            let segs = contig_path_partition_full_unitigs(p, unitig_paths)
+            let segs = contig_path_partition_full_unitigs_indexed(p, unitig_paths, &index)
                 .or_else(|| contig_path_matches_unitig_primary_path(p, unitig_paths))?;
             if segs.is_empty() {
                 None
@@ -256,14 +350,30 @@ pub fn primary_contig_paths_for_gfa(
 pub fn write_gfa1(
     path: &Path,
     segments: &[(String, Vec<u8>)],
-    phase2_illumina_diploid: bool,
-    diploid_unitig_links: Option<&[UnitigGfaLink]>,
-    primary_contig_paths: &[(String, Vec<(usize, char)>)],
-    phase2_unphased_hap_paths: bool,
+    options: GfaWriteOptions<'_>,
 ) -> Result<(), GraphError> {
     let mut w = open_out(path)?;
-    if phase2_illumina_diploid {
-        writeln!(w, "H\tVN:Z:1.0\tXX:Z:trex-phase2-illumina")?;
+    let parent_unitig_tag_map: std::collections::BTreeMap<usize, &str> = options
+        .parent_unitig_tags
+        .unwrap_or(&[])
+        .iter()
+        .map(|(idx, tag)| (*idx, tag.as_str()))
+        .collect();
+    let parent_path_tag_map: std::collections::BTreeMap<&str, &str> = options
+        .parent_path_tags
+        .unwrap_or(&[])
+        .iter()
+        .map(|(name, tag)| (name.as_str(), tag.as_str()))
+        .collect();
+    if options.phase2_illumina_diploid {
+        if parent_path_tag_map.is_empty() {
+            writeln!(w, "H\tVN:Z:1.0\tXX:Z:trex-phase2-illumina")?;
+        } else {
+            writeln!(
+                w,
+                "H\tVN:Z:1.0\tXX:Z:trex-phase2-illumina\tPS:Z:parent-specific-kmer-evidence"
+            )?;
+        }
     } else {
         writeln!(w, "H\tVN:Z:1.0")?;
     }
@@ -274,9 +384,13 @@ pub fn write_gfa1(
             name.clone()
         };
         let seqs = String::from_utf8_lossy(seq);
-        writeln!(w, "S\t{}\t{}", sid, seqs)?;
+        write!(w, "S\t{}\t{}", sid, seqs)?;
+        if let Some(tag) = parent_unitig_tag_map.get(&(i + 1)) {
+            write!(w, "\t{tag}")?;
+        }
+        writeln!(w)?;
     }
-    if let Some(links) = diploid_unitig_links {
+    if let Some(links) = options.diploid_unitig_links {
         for link in links {
             let from_id = format!("utg{:06}", link.from_utg);
             let to_id = format!("utg{:06}", link.to_utg);
@@ -287,7 +401,7 @@ pub fn write_gfa1(
             )?;
         }
     }
-    for (ctg_name, steps) in primary_contig_paths {
+    for (ctg_name, steps) in options.primary_contig_paths {
         write!(w, "P\t{}\t", ctg_name)?;
         for (si, (utg_idx, orient)) in steps.iter().enumerate() {
             if si > 0 {
@@ -295,10 +409,14 @@ pub fn write_gfa1(
             }
             write!(w, "utg{:06}{}", utg_idx, orient)?;
         }
-        writeln!(w, "\t*")?;
+        write!(w, "\t*")?;
+        if let Some(tag) = parent_path_tag_map.get(ctg_name.as_str()) {
+            write!(w, "\t{tag}")?;
+        }
+        writeln!(w)?;
     }
-    if phase2_illumina_diploid && phase2_unphased_hap_paths {
-        for (ctg_name, steps) in primary_contig_paths {
+    if options.phase2_illumina_diploid && options.phase2_unphased_hap_paths {
+        for (ctg_name, steps) in options.primary_contig_paths {
             let hap_id = ctg_name.replacen("ctg", "p2h", 1);
             write!(w, "P\t{}\t", hap_id)?;
             for (si, (utg_idx, orient)) in steps.iter().enumerate() {
@@ -307,7 +425,11 @@ pub fn write_gfa1(
                 }
                 write!(w, "utg{:06}{}", utg_idx, orient)?;
             }
-            writeln!(w, "\t*\tTS:Z:trex-unphased-hap-mirror\tXX:Z:{}", ctg_name)?;
+            write!(w, "\t*\tTS:Z:trex-unphased-hap-mirror\tXX:Z:{}", ctg_name)?;
+            if let Some(tag) = parent_path_tag_map.get(ctg_name.as_str()) {
+                write!(w, "\t{tag}")?;
+            }
+            writeln!(w)?;
         }
     }
     w.flush()?;

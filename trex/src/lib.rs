@@ -8,6 +8,7 @@
 
 pub mod dbg;
 pub mod error;
+pub mod evidence;
 pub mod illumina;
 pub mod kmer;
 

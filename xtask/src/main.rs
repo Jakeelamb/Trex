@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -30,6 +30,8 @@ enum Cmd {
     ValidateData,
     /// Validate tools/assembler_framework.toml.
     ValidateFramework,
+    /// Validate docs/DEVELOPMENT.md and docs/ROADMAP.md.
+    ValidateDevelopment,
     /// Run benchmark matrix scripts for one tier and write a JSON artifact.
     Bench {
         #[arg(long, value_enum, default_value_t = Tier::Pr)]
@@ -89,6 +91,10 @@ struct Row {
     provenance: Option<String>,
     depth_class: Option<String>,
     ci_tier: Option<Tier>,
+    product_claim: Option<String>,
+    claim_level: Option<String>,
+    reference_availability: Option<String>,
+    artifact_policy: Option<String>,
     fixtures: Option<Vec<String>>,
     external_data: Option<String>,
     digest_manifest: Option<String>,
@@ -97,6 +103,7 @@ struct Row {
     main_scripts: Option<Vec<String>>,
     nightly_scripts: Option<Vec<String>>,
     manual_scripts: Option<Vec<String>>,
+    required_tools: Option<Vec<String>>,
     optional_tools: Option<Vec<String>>,
     artifacts: Option<Vec<String>>,
     pr_artifacts: Option<Vec<String>>,
@@ -113,6 +120,14 @@ struct TrexBench {
     args: Vec<String>,
     out_dir: String,
     reference: Option<String>,
+    #[serde(default)]
+    parental_references: Vec<ParentReference>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParentReference {
+    label: String,
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,9 +220,29 @@ struct BenchReport {
 struct BenchRowReport {
     id: String,
     ci_tier: Tier,
+    product_claim: String,
+    claim_level: String,
+    reference_availability: String,
+    artifact_policy: String,
+    tools: ToolAvailability,
+    layer_status: RowLayerStatus,
     scripts: Vec<ScriptReport>,
     trex_runs: Vec<TrexRunReport>,
     artifacts: Vec<ArtifactReport>,
+}
+
+#[derive(Serialize)]
+struct ToolAvailability {
+    required_available: Vec<String>,
+    required_unavailable: Vec<String>,
+    optional_available: Vec<String>,
+    optional_unavailable: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RowLayerStatus {
+    status: String,
+    failed_layer: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -252,7 +287,16 @@ struct AssemblyMetrics {
     contigs: Option<FastaStats>,
     unitigs: Option<FastaStats>,
     gfa: Option<GfaStats>,
+    evidence: Option<serde_json::Value>,
+    annotations: Option<serde_json::Value>,
+    simplification: Option<serde_json::Value>,
+    scaffolds: Option<serde_json::Value>,
+    multi_k: Option<serde_json::Value>,
+    audit: Option<serde_json::Value>,
+    diploid: Option<serde_json::Value>,
     reference_quality: Option<ReferenceQuality>,
+    parental_reference_quality: Vec<NamedReferenceQuality>,
+    read_assembly_quality: Option<ReadAssemblyKmerQuality>,
 }
 
 #[derive(Serialize)]
@@ -294,6 +338,32 @@ struct ReferenceQuality {
 }
 
 #[derive(Serialize)]
+struct NamedReferenceQuality {
+    label: String,
+    path: String,
+    reference: FastaStats,
+    quality: ReferenceQuality,
+}
+
+#[derive(Serialize)]
+struct ReadAssemblyKmerQuality {
+    kmer_size: usize,
+    reliable_threshold: usize,
+    read_distinct_kmers: usize,
+    reliable_read_kmers: usize,
+    assembly_distinct_kmers: usize,
+    assembly_total_kmers: usize,
+    reliable_read_kmers_in_assembly: usize,
+    reliable_read_containment_fraction: f64,
+    assembly_only_kmers: usize,
+    assembly_only_total_kmers: usize,
+    assembly_only_fraction: f64,
+    assembly_only_total_fraction: f64,
+    qv_error_rate: f64,
+    approximate_qv: Option<f64>,
+}
+
+#[derive(Serialize)]
 struct ArtifactReport {
     path: String,
     exists: bool,
@@ -309,11 +379,13 @@ fn main() -> DynResult<()> {
             validate_capabilities(&root)?;
             validate_data_catalog(&root)?;
             validate_assembler_framework(&root)?;
+            validate_development_docs(&root)?;
         }
         Cmd::ValidateMatrix => validate_matrix(&root)?,
         Cmd::ValidateCapabilities => validate_capabilities(&root)?,
         Cmd::ValidateData => validate_data_catalog(&root)?,
         Cmd::ValidateFramework => validate_assembler_framework(&root)?,
+        Cmd::ValidateDevelopment => validate_development_docs(&root)?,
         Cmd::Bench { tier, row, out } => run_bench(&root, tier, row.as_deref(), &out)?,
         Cmd::GenerateReads {
             reference,
@@ -386,6 +458,17 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
         required_str(row.license.as_deref(), idx, "license")?;
         required_str(row.provenance.as_deref(), idx, "provenance")?;
         required_str(row.depth_class.as_deref(), idx, "depth_class")?;
+        required_str(row.product_claim.as_deref(), idx, "product_claim")?;
+        let claim_level = required_str(row.claim_level.as_deref(), idx, "claim_level")?;
+        validate_claim_level(row_id, claim_level)?;
+        let reference_availability = required_str(
+            row.reference_availability.as_deref(),
+            idx,
+            "reference_availability",
+        )?;
+        validate_reference_availability(row_id, reference_availability)?;
+        let artifact_policy = required_str(row.artifact_policy.as_deref(), idx, "artifact_policy")?;
+        validate_artifact_policy(row_id, artifact_policy)?;
         let ci_tier = row
             .ci_tier
             .ok_or_else(|| format!("{row_id}: missing ci_tier"))?;
@@ -450,7 +533,8 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
             )?;
         }
 
-        for artifact in row.artifacts.as_deref().unwrap_or(&[]) {
+        let artifacts = required_list(row.artifacts.as_ref(), row_id, "artifacts")?;
+        for artifact in artifacts {
             if artifact.trim().is_empty() {
                 return Err(format!("{row_id}: artifacts contains an empty entry").into());
             }
@@ -463,11 +547,9 @@ fn validate_matrix(root: &Path) -> DynResult<()> {
             require_rel_path(root, row_id, "tier_artifact", artifact, false)?;
         }
 
-        for optional_tool in row.optional_tools.as_deref().unwrap_or(&[]) {
-            if optional_tool.trim().is_empty() {
-                return Err(format!("{row_id}: optional_tools contains an empty entry").into());
-            }
-        }
+        let required_tools = required_list(row.required_tools.as_ref(), row_id, "required_tools")?;
+        validate_tool_list(row_id, "required_tools", Some(required_tools))?;
+        validate_tool_list(row_id, "optional_tools", row.optional_tools.as_deref())?;
         if let Some(notes) = row.notes.as_deref() {
             if notes.trim().is_empty() {
                 return Err(format!("{row_id}: notes must not be empty when present").into());
@@ -823,6 +905,93 @@ fn validate_assembler_framework(root: &Path) -> DynResult<()> {
     Ok(())
 }
 
+fn validate_development_docs(root: &Path) -> DynResult<()> {
+    let development_path = root.join("docs/DEVELOPMENT.md");
+    let roadmap_path = root.join("docs/ROADMAP.md");
+    let development = fs::read_to_string(&development_path)?;
+    let roadmap = fs::read_to_string(&roadmap_path)?;
+    let readme = fs::read_to_string(root.join("README.md"))?;
+    let capabilities = fs::read_to_string(root.join("docs/CAPABILITIES.md"))?;
+
+    for phrase in [
+        "Orchestrator",
+        "Worker Rules",
+        "Worker Packet Template",
+        "Claim Levels",
+        "Acceptance Checklist",
+        "Commit Discipline",
+        "No `git`.",
+        "No `cargo`.",
+        "cargo fmt --all --check",
+        "cargo clippy --workspace --all-features -- -D warnings",
+        "cargo test --workspace --all-features",
+        "cargo run -p xtask -- validate",
+    ] {
+        if !development.contains(phrase) {
+            return Err(
+                format!("docs/DEVELOPMENT.md missing required protocol phrase: {phrase}").into(),
+            );
+        }
+    }
+
+    for header in [
+        "Objective:",
+        "Files Read:",
+        "Paper/Technique Basis:",
+        "Findings:",
+        "Proposed Change:",
+        "Patch Sketch:",
+        "Tests Orchestrator Should Run:",
+        "Risks / Unknowns:",
+    ] {
+        if !development.contains(header) {
+            return Err(
+                format!("docs/DEVELOPMENT.md missing worker packet header: {header}").into(),
+            );
+        }
+    }
+
+    for level in [
+        "`observed`",
+        "`tested`",
+        "`benchmarked`",
+        "`production-gated`",
+    ] {
+        if !development.contains(level) {
+            return Err(format!("docs/DEVELOPMENT.md missing claim level: {level}").into());
+        }
+    }
+
+    for lane in [
+        "Quality gates",
+        "Evidence ledger",
+        "Graph IR",
+        "Multi-k selection",
+        "Simplification policy",
+        "Assembly audit",
+        "Diploid semantics",
+        "Path/scaffold builder",
+        "Benchmark matrix",
+        "Literature-derived future adapters",
+    ] {
+        if !roadmap.contains(lane) {
+            return Err(format!("docs/ROADMAP.md missing roadmap lane: {lane}").into());
+        }
+    }
+
+    for doc in ["docs/DEVELOPMENT.md", "docs/ROADMAP.md"] {
+        if !readme.contains(doc) {
+            return Err(format!("README.md missing link to {doc}").into());
+        }
+    }
+    if !capabilities.contains("validate-development") {
+        return Err("docs/CAPABILITIES.md missing validate-development command".into());
+    }
+
+    println!("xtask validate-development: OK");
+    Ok(())
+}
+
 fn validate_framework_list(
     root: &Path,
     module_id: &str,
@@ -855,6 +1024,30 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
         }
         matched_filter = true;
         let ci_tier = row.ci_tier.ok_or("validated row missing ci_tier")?;
+        let product_claim = row
+            .product_claim
+            .clone()
+            .ok_or("validated row missing product_claim")?;
+        let claim_level = row
+            .claim_level
+            .clone()
+            .ok_or("validated row missing claim_level")?;
+        let reference_availability = row
+            .reference_availability
+            .clone()
+            .ok_or("validated row missing reference_availability")?;
+        let artifact_policy = row
+            .artifact_policy
+            .clone()
+            .ok_or("validated row missing artifact_policy")?;
+        let tools = tool_availability(
+            row.required_tools.as_deref().unwrap_or(&[]),
+            row.optional_tools.as_deref().unwrap_or(&[]),
+        );
+        let missing_required_tools = !tools.required_unavailable.is_empty();
+        if missing_required_tools {
+            failed = true;
+        }
         let scripts = scripts_for_tier(row, tier);
         let should_run_trex = row
             .trex
@@ -866,29 +1059,34 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
         }
 
         let mut script_reports = Vec::new();
-        for script in scripts {
-            let report = run_script(root, script)?;
-            if !report.success {
-                failed = true;
+        if !missing_required_tools {
+            for script in scripts {
+                let report = run_script(root, script)?;
+                if !report.success {
+                    failed = true;
+                }
+                script_reports.push(report);
             }
-            script_reports.push(report);
         }
 
         let mut trex_reports = Vec::new();
-        if let Some(trex) = row.trex.as_ref() {
-            if should_run_trex {
-                let report = run_trex_bench(root, trex)?;
-                let quast_failed = report
-                    .quast
-                    .as_ref()
-                    .map(|quast| !quast.success)
-                    .unwrap_or(false);
-                if !report.success || quast_failed {
-                    failed = true;
+        if !missing_required_tools {
+            if let Some(trex) = row.trex.as_ref() {
+                if should_run_trex {
+                    let report = run_trex_bench(root, trex)?;
+                    let quast_failed = report
+                        .quast
+                        .as_ref()
+                        .map(|quast| !quast.success)
+                        .unwrap_or(false);
+                    if !report.success || quast_failed {
+                        failed = true;
+                    }
+                    trex_reports.push(report);
                 }
-                trex_reports.push(report);
             }
         }
+        let layer_status = row_layer_status(&tools, &script_reports, &trex_reports);
 
         let artifacts = artifacts_for_tier(row, tier)
             .into_iter()
@@ -905,6 +1103,12 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
         rows.push(BenchRowReport {
             id: row_id,
             ci_tier,
+            product_claim,
+            claim_level,
+            reference_availability,
+            artifact_policy,
+            tools,
+            layer_status,
             scripts: script_reports,
             trex_runs: trex_reports,
             artifacts,
@@ -934,9 +1138,88 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
     println!("xtask bench: wrote {}", out_path.display());
 
     if failed {
-        return Err("xtask bench: one or more scripts failed".into());
+        return Err("xtask bench: one or more rows failed".into());
     }
     Ok(())
+}
+
+fn tool_availability(required_tools: &[String], optional_tools: &[String]) -> ToolAvailability {
+    let (required_available, required_unavailable) = partition_tools(required_tools);
+    let (optional_available, optional_unavailable) = partition_tools(optional_tools);
+    ToolAvailability {
+        required_available,
+        required_unavailable,
+        optional_available,
+        optional_unavailable,
+    }
+}
+
+fn partition_tools(tools: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut available = Vec::new();
+    let mut unavailable = Vec::new();
+    for tool in tools {
+        if command_available(tool) {
+            available.push(tool.clone());
+        } else {
+            unavailable.push(tool.clone());
+        }
+    }
+    (available, unavailable)
+}
+
+fn command_available(name: &str) -> bool {
+    let path = Path::new(name);
+    if path.components().count() > 1 {
+        return path.exists();
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
+}
+
+fn row_layer_status(
+    tools: &ToolAvailability,
+    scripts: &[ScriptReport],
+    trex_reports: &[TrexRunReport],
+) -> RowLayerStatus {
+    if let Some(tool) = tools.required_unavailable.first() {
+        return RowLayerStatus {
+            status: "failed".to_string(),
+            failed_layer: Some(format!("required_tool:{tool}")),
+        };
+    }
+    for script in scripts {
+        if !script.success {
+            return RowLayerStatus {
+                status: "failed".to_string(),
+                failed_layer: Some(format!("script:{}", script.path)),
+            };
+        }
+    }
+    for report in trex_reports {
+        if !report.success {
+            return RowLayerStatus {
+                status: "failed".to_string(),
+                failed_layer: Some("trex".to_string()),
+            };
+        }
+        if report
+            .quast
+            .as_ref()
+            .map(|quast| !quast.success)
+            .unwrap_or(false)
+        {
+            return RowLayerStatus {
+                status: "failed".to_string(),
+                failed_layer: Some("quast".to_string()),
+            };
+        }
+    }
+    RowLayerStatus {
+        status: "passed".to_string(),
+        failed_layer: None,
+    }
 }
 
 fn run_gate(root: &Path, tier: Tier) -> DynResult<()> {
@@ -982,6 +1265,48 @@ fn required_list<'a>(
     }
 }
 
+fn validate_claim_level(row_id: &str, value: &str) -> DynResult<()> {
+    if matches!(
+        value,
+        "observed" | "tested" | "benchmarked" | "production-gated"
+    ) {
+        Ok(())
+    } else {
+        Err(format!("{row_id}: unsupported claim_level {value:?}").into())
+    }
+}
+
+fn validate_reference_availability(row_id: &str, value: &str) -> DynResult<()> {
+    if matches!(
+        value,
+        "none" | "single_reference" | "parental_haplotypes" | "external_reference"
+    ) {
+        Ok(())
+    } else {
+        Err(format!("{row_id}: unsupported reference_availability {value:?}").into())
+    }
+}
+
+fn validate_artifact_policy(row_id: &str, value: &str) -> DynResult<()> {
+    if matches!(value, "required" | "optional" | "manual_archive") {
+        Ok(())
+    } else {
+        Err(format!("{row_id}: unsupported artifact_policy {value:?}").into())
+    }
+}
+
+fn validate_tool_list(row_id: &str, key: &str, values: Option<&[String]>) -> DynResult<()> {
+    for value in values.unwrap_or(&[]) {
+        if value.trim().is_empty() {
+            return Err(format!("{row_id}: {key} contains an empty entry").into());
+        }
+        if value.contains('/') || value.contains('\\') {
+            return Err(format!("{row_id}: {key} must contain tool names, got {value}").into());
+        }
+    }
+    Ok(())
+}
+
 fn require_rel_path(
     root: &Path,
     row_id: &str,
@@ -1020,6 +1345,26 @@ fn validate_trex_bench(
     require_rel_path(root, row_id, "trex.out_dir", &trex.out_dir, false)?;
     if let Some(reference) = trex.reference.as_deref() {
         require_rel_path(root, row_id, "trex.reference", reference, !is_external)?;
+    }
+    let mut parent_labels = BTreeSet::new();
+    for parent in &trex.parental_references {
+        if parent.label.trim().is_empty() {
+            return Err(format!("{row_id}: parental reference label must not be empty").into());
+        }
+        if !parent_labels.insert(parent.label.clone()) {
+            return Err(format!(
+                "{row_id}: duplicate parental reference label {:?}",
+                parent.label
+            )
+            .into());
+        }
+        require_rel_path(
+            root,
+            row_id,
+            "trex.parental_references.path",
+            &parent.path,
+            !is_external,
+        )?;
     }
     if let Some(r1) = value_after(&trex.args, "--r1") {
         require_rel_path(root, row_id, "trex.--r1", r1, !is_external)?;
@@ -1189,6 +1534,13 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let contigs = fasta_stats_optional(&out_dir.join("contigs.fa"))?;
     let unitigs = fasta_stats_optional(&out_dir.join("unitigs.fa"))?;
     let gfa = gfa_stats_optional(&out_dir.join("graph.gfa"))?;
+    let evidence = evidence_json_optional(&out_dir.join("evidence.json"))?;
+    let annotations = json_optional(&out_dir.join("annotations.json"))?;
+    let simplification = json_optional(&out_dir.join("simplification.json"))?;
+    let scaffolds = json_optional(&out_dir.join("scaffolds.json"))?;
+    let multi_k = json_optional(&out_dir.join("multi_k.json"))?;
+    let audit = json_optional(&out_dir.join("audit.json"))?;
+    let diploid = json_optional(&out_dir.join("diploid.json"))?;
     let reference_quality = match (trex.reference.as_deref(), kmer_size) {
         (Some(reference), Some(k)) => {
             let contigs_path = out_dir.join("contigs.fa");
@@ -1200,6 +1552,30 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         }
         _ => None,
     };
+    let parental_reference_quality = match kmer_size {
+        Some(k) => parental_reference_quality(root, trex, &out_dir.join("contigs.fa"), k)?,
+        None => Vec::new(),
+    };
+    let read_assembly_quality = match kmer_size {
+        Some(k) => {
+            let contigs_path = out_dir.join("contigs.fa");
+            if contigs_path.exists() {
+                let reliable_threshold = value_after(&trex.args, "--trusted-threshold")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(2);
+                Some(read_assembly_kmer_quality(
+                    root,
+                    &trex.args,
+                    &contigs_path,
+                    k,
+                    reliable_threshold,
+                )?)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
     Ok(AssemblyMetrics {
         kmer_size,
         candidate_kmers,
@@ -1209,8 +1585,29 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         contigs,
         unitigs,
         gfa,
+        evidence,
+        annotations,
+        simplification,
+        scaffolds,
+        multi_k,
+        audit,
+        diploid,
         reference_quality,
+        parental_reference_quality,
+        read_assembly_quality,
     })
+}
+
+fn evidence_json_optional(path: &Path) -> DynResult<Option<serde_json::Value>> {
+    json_optional(path)
+}
+
+fn json_optional(path: &Path) -> DynResult<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
 fn run_optional_quast(root: &Path, trex: &TrexBench) -> DynResult<Option<ScriptReport>> {
@@ -1353,12 +1750,29 @@ fn fasta_stats(path: &Path) -> DynResult<FastaStats> {
 }
 
 fn fastq_stats(path: &Path, kmer_size: Option<usize>) -> DynResult<FastqStats> {
+    let seqs = fastq_sequences(path)?;
+    let records = seqs.len();
+    let total_bases: usize = seqs.iter().map(Vec::len).sum();
+    let min_len = seqs.iter().map(Vec::len).min().unwrap_or(0);
+    let max_len = seqs.iter().map(Vec::len).max().unwrap_or(0);
+    let candidate_kmers = kmer_size.map(|k| {
+        seqs.iter()
+            .filter(|seq| seq.len() >= k)
+            .map(|seq| seq.len() - k + 1)
+            .sum()
+    });
+    Ok(FastqStats {
+        records,
+        total_bases,
+        min_len,
+        max_len,
+        candidate_kmers,
+    })
+}
+
+fn fastq_sequences(path: &Path) -> DynResult<Vec<Vec<u8>>> {
     let text = fs::read_to_string(path)?;
-    let mut records = 0;
-    let mut total_bases = 0;
-    let mut min_len = usize::MAX;
-    let mut max_len = 0;
-    let mut candidate_kmers = kmer_size.map(|_| 0usize);
+    let mut seqs = Vec::new();
     let mut lines = text.lines();
     while let Some(header) = lines.next() {
         if header.is_empty() {
@@ -1370,26 +1784,9 @@ fn fastq_stats(path: &Path, kmer_size: Option<usize>) -> DynResult<FastqStats> {
         if !header.starts_with('@') || !plus.starts_with('+') || qual.len() != seq.len() {
             return Err(format!("invalid FASTQ record in {}", path.display()).into());
         }
-        records += 1;
-        total_bases += seq.len();
-        min_len = min_len.min(seq.len());
-        max_len = max_len.max(seq.len());
-        if let (Some(k), Some(total)) = (kmer_size, candidate_kmers.as_mut()) {
-            if seq.len() >= k {
-                *total += seq.len() - k + 1;
-            }
-        }
+        seqs.push(seq.as_bytes().iter().map(u8::to_ascii_uppercase).collect());
     }
-    if records == 0 {
-        min_len = 0;
-    }
-    Ok(FastqStats {
-        records,
-        total_bases,
-        min_len,
-        max_len,
-        candidate_kmers,
-    })
+    Ok(seqs)
 }
 
 fn length_stats(mut lens: Vec<usize>) -> FastaStats {
@@ -1455,6 +1852,32 @@ fn reference_quality(
     Ok(reference_quality_from_sequences(&reference, &contigs, k))
 }
 
+fn parental_reference_quality(
+    root: &Path,
+    trex: &TrexBench,
+    contigs_path: &Path,
+    k: usize,
+) -> DynResult<Vec<NamedReferenceQuality>> {
+    if trex.parental_references.is_empty() || !contigs_path.exists() {
+        return Ok(Vec::new());
+    }
+    let contigs = fasta_sequences(contigs_path)?;
+    let mut out = Vec::with_capacity(trex.parental_references.len());
+    for parent in &trex.parental_references {
+        let path = root.join(&parent.path);
+        let reference = fasta_sequences(&path)?;
+        let reference_stats = length_stats(reference.iter().map(Vec::len).collect());
+        let quality = reference_quality_from_sequences(&reference, &contigs, k);
+        out.push(NamedReferenceQuality {
+            label: parent.label.clone(),
+            path: parent.path.clone(),
+            reference: reference_stats,
+            quality,
+        });
+    }
+    Ok(out)
+}
+
 fn reference_quality_from_sequences(
     reference: &[Vec<u8>],
     contigs: &[Vec<u8>],
@@ -1498,6 +1921,132 @@ fn reference_quality_from_sequences(
         contig_records: contigs.len(),
         contig_bases,
         contig_bases_with_reference_hit,
+    }
+}
+
+fn read_assembly_kmer_quality(
+    root: &Path,
+    args: &[String],
+    contigs_path: &Path,
+    k: usize,
+    reliable_threshold: usize,
+) -> DynResult<ReadAssemblyKmerQuality> {
+    let r1 = value_after(args, "--r1").ok_or("Trex benchmark args missing --r1")?;
+    let mut reads = sequence_records(&root.join(r1))?;
+    if let Some(r2) = value_after(args, "--r2") {
+        reads.extend(sequence_records(&root.join(r2))?);
+    }
+    let assembly = fasta_sequences(contigs_path)?;
+    Ok(read_assembly_kmer_quality_from_sequences(
+        &reads,
+        &assembly,
+        k,
+        reliable_threshold,
+    ))
+}
+
+fn sequence_records(path: &Path) -> DynResult<Vec<Vec<u8>>> {
+    if path_is_fasta(path) {
+        fasta_sequences(path)
+    } else {
+        fastq_sequences(path)
+    }
+}
+
+fn path_is_fasta(path: &Path) -> bool {
+    let s = path.to_string_lossy().to_ascii_lowercase();
+    s.ends_with(".fa")
+        || s.ends_with(".fasta")
+        || s.ends_with(".fna")
+        || s.ends_with(".fa.gz")
+        || s.ends_with(".fasta.gz")
+        || s.ends_with(".fna.gz")
+}
+
+fn read_assembly_kmer_quality_from_sequences(
+    reads: &[Vec<u8>],
+    assembly: &[Vec<u8>],
+    k: usize,
+    reliable_threshold: usize,
+) -> ReadAssemblyKmerQuality {
+    let read_counts = canonical_kmer_counts(reads, k);
+    let assembly_counts = canonical_kmer_counts(assembly, k);
+    let reliable_read_kmers = read_counts
+        .values()
+        .filter(|count| **count >= reliable_threshold)
+        .count();
+    let reliable_read_kmers_in_assembly = read_counts
+        .iter()
+        .filter(|(kmer, count)| {
+            **count >= reliable_threshold && assembly_counts.contains_key(*kmer)
+        })
+        .count();
+    let assembly_only_kmers = assembly_counts
+        .keys()
+        .filter(|kmer| {
+            read_counts
+                .get(*kmer)
+                .map(|count| *count < reliable_threshold)
+                .unwrap_or(true)
+        })
+        .count();
+    let assembly_total_kmers: usize = assembly_counts.values().sum();
+    let assembly_only_total_kmers: usize = assembly_counts
+        .iter()
+        .filter(|(kmer, _count)| {
+            read_counts
+                .get(*kmer)
+                .map(|count| *count < reliable_threshold)
+                .unwrap_or(true)
+        })
+        .map(|(_kmer, count)| *count)
+        .sum();
+    let reliable_read_containment_fraction =
+        fraction(reliable_read_kmers_in_assembly, reliable_read_kmers);
+    let assembly_only_fraction = fraction(assembly_only_kmers, assembly_counts.len());
+    let assembly_only_total_fraction = fraction(assembly_only_total_kmers, assembly_total_kmers);
+    let approximate_qv = if assembly_only_fraction > 0.0 {
+        Some(-10.0 * assembly_only_fraction.log10())
+    } else {
+        None
+    };
+
+    ReadAssemblyKmerQuality {
+        kmer_size: k,
+        reliable_threshold,
+        read_distinct_kmers: read_counts.len(),
+        reliable_read_kmers,
+        assembly_distinct_kmers: assembly_counts.len(),
+        assembly_total_kmers,
+        reliable_read_kmers_in_assembly,
+        reliable_read_containment_fraction,
+        assembly_only_kmers,
+        assembly_only_total_kmers,
+        assembly_only_fraction,
+        assembly_only_total_fraction,
+        qv_error_rate: assembly_only_fraction,
+        approximate_qv,
+    }
+}
+
+fn canonical_kmer_counts(seqs: &[Vec<u8>], k: usize) -> HashMap<Vec<u8>, usize> {
+    let mut out = HashMap::new();
+    if k == 0 {
+        return out;
+    }
+    for seq in seqs {
+        for window in acgt_windows(seq, k) {
+            *out.entry(canonical_kmer(window)).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+fn fraction(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
     }
 }
 
@@ -1973,6 +2522,17 @@ fn parse_time_stderr(stderr: &str) -> (Option<f64>, Option<u64>, String) {
 mod tests {
     use super::*;
 
+    fn temp_root(name: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_millis();
+        let root =
+            std::env::temp_dir().join(format!("trex-xtask-{name}-{}-{millis}", std::process::id()));
+        fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
     #[test]
     fn reference_quality_counts_forward_and_reverse_kmers() {
         let reference = vec![b"ACCGTTAA".to_vec()];
@@ -1996,5 +2556,134 @@ mod tests {
         assert_eq!(q.contig_kmers, 1);
         assert_eq!(q.contig_kmers_in_reference, 1);
         assert_eq!(q.contigs_with_reference_hit, 1);
+    }
+
+    #[test]
+    fn matrix_deserializes_parental_references() {
+        let text = r#"
+schema_version = 1
+
+[[rows]]
+id = "phase2"
+technology = "illumina_pe"
+organism = "synthetic"
+license = "in_repo"
+provenance = "fixtures"
+depth_class = "smoke"
+ci_tier = "manual"
+product_claim = "observed parent-specific metric"
+claim_level = "observed"
+reference_availability = "parental_haplotypes"
+artifact_policy = "required"
+fixtures = ["fixtures/phase2_synthetic/reads.fq"]
+required_tools = ["cargo"]
+artifacts = ["target/x/contigs.fa"]
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/x"
+args = ["illumina", "assemble", "--r1", "fixtures/phase2_synthetic/reads.fq", "--kmer-size", "3", "--out-dir", "target/x"]
+parental_references = [
+  { label = "parent1", path = "fixtures/phase2_synthetic/parent1.fa" },
+  { label = "parent2", path = "fixtures/phase2_synthetic/parent2.fa" },
+]
+"#;
+        let matrix: Matrix = toml::from_str(text).expect("matrix");
+        let trex = matrix.rows[0].trex.as_ref().expect("trex");
+        assert_eq!(trex.parental_references.len(), 2);
+        assert_eq!(trex.parental_references[0].label, "parent1");
+        assert_eq!(
+            trex.parental_references[1].path,
+            "fixtures/phase2_synthetic/parent2.fa"
+        );
+    }
+
+    #[test]
+    fn parental_reference_quality_reports_each_parent() {
+        let root = temp_root("parental-quality");
+        fs::create_dir_all(root.join("parents")).expect("parents dir");
+        fs::create_dir_all(root.join("out")).expect("out dir");
+        fs::write(root.join("parents/p1.fa"), b">p1\nACGTACGT\n").expect("p1");
+        fs::write(root.join("parents/p2.fa"), b">p2\nTTTTTTTT\n").expect("p2");
+        fs::write(root.join("out/contigs.fa"), b">ctg\nACGTAC\n").expect("contigs");
+
+        let trex = TrexBench {
+            tiers: vec![Tier::Manual],
+            args: vec![],
+            out_dir: "out".to_string(),
+            reference: None,
+            parental_references: vec![
+                ParentReference {
+                    label: "p1".to_string(),
+                    path: "parents/p1.fa".to_string(),
+                },
+                ParentReference {
+                    label: "p2".to_string(),
+                    path: "parents/p2.fa".to_string(),
+                },
+            ],
+        };
+        let q = parental_reference_quality(&root, &trex, &root.join("out/contigs.fa"), 3)
+            .expect("parental quality");
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].label, "p1");
+        assert_eq!(q[0].quality.contig_kmer_reference_fraction, 1.0);
+        assert_eq!(q[1].label, "p2");
+        assert_eq!(q[1].quality.contig_kmer_reference_fraction, 0.0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_assembly_quality_reports_containment_and_assembly_only_kmers() {
+        let reads = vec![b"ACGTACGT".to_vec()];
+        let assembly = vec![b"ACGTTCGT".to_vec()];
+        let q = read_assembly_kmer_quality_from_sequences(&reads, &assembly, 3, 2);
+
+        assert_eq!(q.read_distinct_kmers, 2);
+        assert_eq!(q.reliable_read_kmers, 2);
+        assert_eq!(q.assembly_distinct_kmers, 4);
+        assert_eq!(q.assembly_total_kmers, 6);
+        assert_eq!(q.reliable_read_kmers_in_assembly, 1);
+        assert_eq!(q.reliable_read_containment_fraction, 0.5);
+        assert_eq!(q.assembly_only_kmers, 3);
+        assert_eq!(q.assembly_only_total_kmers, 3);
+        assert_eq!(q.assembly_only_fraction, 0.75);
+        assert_eq!(q.assembly_only_total_fraction, 0.5);
+        let qv = q
+            .approximate_qv
+            .expect("nonzero assembly-only fraction has QV");
+        assert!((qv - 1.249_387).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn read_assembly_quality_uses_none_for_zero_error_qv() {
+        let reads = vec![b"ACGTACGT".to_vec()];
+        let assembly = vec![b"ACGTACGT".to_vec()];
+        let q = read_assembly_kmer_quality_from_sequences(&reads, &assembly, 3, 1);
+
+        assert_eq!(q.assembly_only_kmers, 0);
+        assert_eq!(q.assembly_only_total_kmers, 0);
+        assert_eq!(q.assembly_only_total_fraction, 0.0);
+        assert_eq!(q.qv_error_rate, 0.0);
+        assert_eq!(q.approximate_qv, None);
+    }
+
+    #[test]
+    fn layer_status_reports_missing_required_tool_first() {
+        let tools = ToolAvailability {
+            required_available: Vec::new(),
+            required_unavailable: vec!["definitely_missing_trex_tool".to_string()],
+            optional_available: Vec::new(),
+            optional_unavailable: Vec::new(),
+        };
+
+        let status = row_layer_status(&tools, &[], &[]);
+
+        assert_eq!(status.status, "failed");
+        assert_eq!(
+            status.failed_layer.as_deref(),
+            Some("required_tool:definitely_missing_trex_tool")
+        );
     }
 }

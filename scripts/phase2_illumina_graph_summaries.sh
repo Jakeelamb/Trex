@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FQ="${ROOT}/fixtures/phase2_synthetic/reads.fq"
+P1="${ROOT}/fixtures/phase2_synthetic/parent1.fa"
+P2="${ROOT}/fixtures/phase2_synthetic/parent2.fa"
 OUT="${ROOT}/target/phase2-graph-summaries"
 mkdir -p "${OUT}"
 
@@ -12,6 +14,8 @@ cargo run -q -p trex-cli -- illumina assemble \
   --kmer-size 4 \
   --trusted-threshold 1 \
   --diploid \
+  --parent1-reference "${P1}" \
+  --parent2-reference "${P2}" \
   --out-dir "${OUT}"
 
 python3 - "${OUT}" <<'PY'
@@ -23,8 +27,9 @@ from pathlib import Path
 out = Path(sys.argv[1])
 contigs = out / "contigs.fa"
 gfa = out / "graph.gfa"
-if not contigs.is_file() or not gfa.is_file():
-    sys.stderr.write("phase2_illumina_graph_summaries: missing contigs.fa or graph.gfa\n")
+diploid = out / "diploid.json"
+if not contigs.is_file() or not gfa.is_file() or not diploid.is_file():
+    sys.stderr.write("phase2_illumina_graph_summaries: missing contigs.fa, graph.gfa, or diploid.json\n")
     sys.exit(1)
 
 # Phase-1 reference-free metrics on primary FASTA only (naming kept for operator clarity).
@@ -65,6 +70,11 @@ if "trex-phase2-illumina" not in text:
         "phase2_illumina_graph_summaries: expected Phase-2 GFA header tag trex-phase2-illumina\n"
     )
     sys.exit(1)
+if "parent-specific-kmer-evidence" not in text:
+    sys.stderr.write(
+        "phase2_illumina_graph_summaries: expected GFA parent-specific k-mer evidence tag\n"
+    )
+    sys.exit(1)
 s_lines = len(re.findall(r"(?m)^S\t", text))
 l_lines = len(re.findall(r"(?m)^L\t", text))
 p_lines = len(re.findall(r"(?m)^P\t", text))
@@ -75,6 +85,24 @@ print(
 if s_lines < 1:
     sys.stderr.write("phase2_illumina_graph_summaries: expected at least one GFA S line\n")
     sys.exit(1)
+
+import json
+
+report = json.loads(diploid.read_text())
+summary = report.get("summary", {})
+if not summary.get("parent_references_supplied"):
+    sys.stderr.write("phase2_illumina_graph_summaries: expected parent references in diploid.json\n")
+    sys.exit(1)
+if summary.get("full_haplotype_fasta_claimed"):
+    sys.stderr.write("phase2_illumina_graph_summaries: diploid.json must not claim full haplotype FASTA\n")
+    sys.exit(1)
+if summary.get("parent_informative_unitigs", 0) < 1:
+    sys.stderr.write("phase2_illumina_graph_summaries: expected parent-informative unitigs\n")
+    sys.exit(1)
+print(
+    "phase2_illumina_graph_summaries: parent-specific unitigs="
+    f"{summary.get('parent_informative_unitigs', 0)} mixed_unitigs={summary.get('mixed_unitigs', 0)}"
+)
 PY
 
 echo "phase2_illumina_graph_summaries: OK"

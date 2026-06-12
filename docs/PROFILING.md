@@ -68,7 +68,7 @@ Rows:
 |-----|--------|-----------------|----------------|
 | `ecoli_mg1655_srr001666_1k_pairs` | ENA `SRR001666` + RefSeq `GCF_000005845.2` / `NC_000913.3`; 7,047,668 paired spots / 507,432,096 bases | 1,000 R1 + 1,000 R2 reads | Passes: 2,000 reads, 11,880 unique/trusted k-mers, 1,979 contigs, N50 36 bp, 0.16 s, 19,172 KiB RSS. Reference-quality: 10,557 / 11,880 contig k-mers in reference (88.86%), 1,818 / 1,979 contigs with a reference k-mer hit. QUAST basic stats only: all contigs reported unaligned. |
 | `ecoli_mg1655_srr001666_10k_pairs` | ENA `SRR001666` + RefSeq `GCF_000005845.2` / `NC_000913.3` | 10,000 R1 + 10,000 R2 reads | Passes: 20,000 reads, 117,829 unique/trusted k-mers, 19,433 contigs, N50 36 bp, 6.61 s, 155,348 KiB RSS. Reference-quality: 97,729 / 117,546 contig k-mers in reference (83.14%), 16,902 / 19,433 contigs with a reference k-mer hit. QUAST basic stats only: all contigs reported unaligned. |
-| `yeast_btt_err1308583_diploid_1k_pairs` | ENA `ERR1308583` + RefSeq `GCF_000146045.2_R64`; 14,550,715 paired spots / 2,870,913,582 bases; BTT ploidy table = euploid diploid | 1,000 R1 + 1,000 R2 reads | Passes: 2,000 reads, 149,866 unique/trusted k-mers, 1,884 contigs, N50 101 bp, 15.00 s, 176,680 KiB RSS. Reference-quality: 129,452 / 146,994 contig k-mers in reference (88.07%), 1,853 / 1,884 contigs with a reference k-mer hit. QUAST: genome fraction 2.000%, NA50 101, 1 misassembly, 210 unaligned contigs. |
+| `yeast_btt_err1308583_diploid_1k_pairs` | ENA `ERR1308583` + RefSeq `GCF_000146045.2_R64`; 14,550,715 paired spots / 2,870,913,582 bases; BTT ploidy table = euploid diploid | 1,000 R1 + 1,000 R2 reads | Passes: 2,000 reads, 149,866 unique/trusted k-mers, 1,885 contigs, N50 101 bp, 9.10 s, 214,292 KiB RSS. Reference-quality: 129,490 / 147,049 contig k-mers in reference (88.06%), 1,854 / 1,885 contigs with a reference k-mer hit. QUAST remains optional for this manual row. |
 
 Immediate read:
 
@@ -101,3 +101,54 @@ Immediate read:
 - Linear/cyclic component walking now uses one deterministic traversal plus reverse-orientation
   scoring instead of launching a greedy walk from every vertex. The E. coli 10k regression row kept
   identical output/reference-quality metrics and improved wall time from 6.61 s to 5.67 s.
+- `pick_best_stitchable_path` now computes candidate edge score before stitching and skips candidates
+  that cannot beat the best already-stitched score. On `ecoli_mg1655_srr001666_10k_pairs`, wall time
+  moved from 6.20 s (`target/benchmarks/ecoli-10k-before-walk-prune.json`) to 5.40 s
+  (`target/benchmarks/ecoli-10k-after-walk-prune-final.json`) with identical contig/unitig counts,
+  reference k-mer fraction, read containment, and assembly-only k-mer count.
+- `stitch_from` now preallocates the stitched sequence and picks between direct/reverse-complement
+  orientations without allocating and sorting a temporary option vector at every step. On the same
+  row, repeated measurement landed at 5.37 s and 154,768 KiB RSS
+  (`target/benchmarks/ecoli-10k-after-stitch-opts-2.json`) with unchanged assembly metrics.
+- `pick_best_stitchable_path` now accepts any candidate iterator, so branching components can stream
+  greedy paths directly instead of first collecting every candidate path. The same E. coli 10k row
+  measured 4.98 s and 153,440 KiB RSS (`target/benchmarks/ecoli-10k-after-candidate-stream.json`),
+  again with identical contig/unitig counts and k-mer quality metrics.
+- Wave 6 introduced a dense internal `NodeId` view for `DbgGraph` and moved reference contig walking
+  onto that view for connected components, linear-component walks, greedy neighbor selection, edge
+  weights, and diploid multiplicity tie-breaks. This is a representation step only; do not attach a
+  performance claim until a fresh biological before/after artifact is captured.
+- Post-change E. coli 10k completed through the governed manual row at
+  `target/benchmarks/ecoli-10k-compact-id.json`: 20,000 reads, 117,829 unique/trusted k-mers,
+  19,433 unitigs/contigs, N50 36 bp, 6.19 s GNU time, 206,716 KiB max RSS, 99.74% reliable-read
+  k-mer containment, and 0 assembly-only k-mers. The E. coli 100k sentinel was attempted at
+  `target/benchmarks/ecoli-100k-compact-id.json` and stopped after 606.58 s / 1,499,588 KiB RSS
+  before export completion (exit 143), so 100k remains the next graph-storage proof target.
+- Keeping the compact walk in `NodeId` form until the selected path is known improved the E. coli 10k
+  compact row to 5.73 s at `target/benchmarks/ecoli-10k-compact-id-id-stitch.json` with unchanged
+  contig/unitig counts, reference quality, read containment, and 0 assembly-only k-mers. Max RSS was
+  206,904 KiB, so compact graph memory reduction is still not proven by this slice.
+- A fresh E. coli 100k attempt on the current compact-walk code wrote
+  `target/benchmarks/ecoli-100k-current-compact-walk.json` and was stopped after 900.25 s /
+  1,499,620 KiB RSS (exit 143). It reached graph simplification logging
+  (`tips_removed=13784`) but emitted no assembly metrics, so the remaining 100k bottleneck is
+  downstream of simplification and before completed exports/metrics.
+- Stage timing showed `primary_contig_paths_for_gfa` was scanning all unitigs for each contig offset:
+  on E. coli 10k it took 5.08 s inside `target/benchmarks/ecoli-10k-stage-timing-probe.json`.
+  Indexing unitigs by first/last vertex reduced that stage to 51 ms and the full row to 3.29 s in
+  `target/benchmarks/ecoli-10k-gfa-path-index.json`, with unchanged contigs, read containment, and
+  0 assembly-only k-mers.
+- The same indexed GFA path code cleared the E. coli 100k sentinel in
+  `target/benchmarks/ecoli-100k-gfa-path-index.json`: 200,000 reads, 1,075,156 unique/trusted k-mers,
+  163,132 unitigs, 163,124 contigs, N50 36 bp, 55.54 s GNU time, 1,752,444 KiB max RSS, 98.16%
+  reliable-read k-mer containment, and 0 assembly-only k-mers. This proves the 100k scaling gate for
+  the current representation; peak memory remains high and is not a memory-reduction claim.
+- Streaming JSON sidecar writes removed the large pretty-JSON string buffers for evidence,
+  annotations, simplification, scaffold, audit, and diploid reports. The E. coli 100k row improved to
+  40.49 s / 1,586,644 KiB in `target/benchmarks/ecoli-100k-stream-json-sidecars.json` with identical
+  contig count, total bases, reliable-read containment, and 0 assembly-only k-mers. This is a
+  sidecar-allocation reduction only; the graph itself still needs a deeper memory pass.
+- Post-assembly audit sidecars are now emitted without repair. The yeast BTT diploid 1k row wrote
+  `target/benchmarks/yeast-btt-audit.json` and `target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/audit.tsv`:
+  1,885 contigs, 147,049 assembly k-mers, 147,031 trusted-supported k-mers, 18 low-support k-mers
+  in one region, and one collapsed-repeat suspicion finding.

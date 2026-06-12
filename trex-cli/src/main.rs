@@ -7,6 +7,8 @@ use serde::Deserialize;
 use tokio::task::spawn_blocking;
 use tracing_subscriber::EnvFilter;
 
+use trex::illumina::diploid::ParentReferenceParams;
+use trex::illumina::multik::MultiKParams;
 use trex::illumina::pipeline::{
     assemble_illumina, AssembleOutputs, AssembleParams, DiploidParams, SimplifyOverrides,
 };
@@ -27,6 +29,8 @@ struct DiploidFilePartial {
     enabled: Option<bool>,
     insert_mean_bp: Option<u64>,
     insert_stddev_bp: Option<u64>,
+    parent1_reference: Option<PathBuf>,
+    parent2_reference: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -34,6 +38,7 @@ struct DiploidFilePartial {
 struct AssembleFileConfig {
     r2: Option<PathBuf>,
     k: Option<usize>,
+    k_ladder: Option<Vec<usize>>,
     trusted_threshold: Option<u64>,
     checkpoint_root: Option<PathBuf>,
     resume: Option<bool>,
@@ -85,6 +90,9 @@ enum IlluminaCmd {
         /// *k*-mer size (required unless set in `--config`).
         #[arg(short = 'k', long = "kmer-size")]
         k: Option<usize>,
+        /// Explicit multi-k candidate ladder, for example `21,31,41`; selects one graph and writes `multi_k.json`.
+        #[arg(long = "kmer-ladder", value_delimiter = ',')]
+        k_ladder: Option<Vec<usize>>,
         #[arg(short = 'T', long = "trusted-threshold")]
         trusted_threshold: Option<u64>,
         #[arg(long)]
@@ -127,6 +135,12 @@ enum IlluminaCmd {
         insert_mean_bp: Option<u64>,
         #[arg(long)]
         insert_stddev_bp: Option<u64>,
+        /// Optional parent-1 reference FASTA for report-only parent-specific k-mer evidence.
+        #[arg(long)]
+        parent1_reference: Option<PathBuf>,
+        /// Optional parent-2 reference FASTA for report-only parent-specific k-mer evidence.
+        #[arg(long)]
+        parent2_reference: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -147,6 +161,7 @@ async fn main() -> std::process::ExitCode {
                 r1,
                 r2,
                 k,
+                k_ladder,
                 trusted_threshold,
                 checkpoint_root,
                 resume,
@@ -164,6 +179,8 @@ async fn main() -> std::process::ExitCode {
                 diploid,
                 insert_mean_bp,
                 insert_stddev_bp,
+                parent1_reference,
+                parent2_reference,
                 config,
             } => {
                 let file_cfg = if let Some(path) = &config {
@@ -195,10 +212,16 @@ async fn main() -> std::process::ExitCode {
                     AssembleFileConfig::default()
                 };
 
-                let k = k.or(file_cfg.k);
+                let resolved_k_ladder = k_ladder.or(file_cfg.k_ladder).unwrap_or_default();
+                let k = k.or(file_cfg.k).or_else(|| {
+                    resolved_k_ladder
+                        .iter()
+                        .copied()
+                        .find(|candidate| *candidate > 0)
+                });
                 let Some(k) = k else {
                     tracing::error!(
-                        "k-mer size missing: pass `--kmer-size` / `-k` or set `k` in config (optionally under `[assemble]`)"
+                        "k-mer size missing: pass `--kmer-size` / `-k`, set `k` in config, or provide a non-empty `--kmer-ladder`"
                     );
                     return std::process::ExitCode::from(1);
                 };
@@ -259,6 +282,16 @@ async fn main() -> std::process::ExitCode {
                         .or(file_cfg.diploid.as_ref().and_then(|d| d.insert_mean_bp)),
                     insert_stddev_bp: insert_stddev_bp
                         .or(file_cfg.diploid.as_ref().and_then(|d| d.insert_stddev_bp)),
+                    parent_references: ParentReferenceParams {
+                        parent1: parent1_reference.or(file_cfg
+                            .diploid
+                            .as_ref()
+                            .and_then(|d| d.parent1_reference.clone())),
+                        parent2: parent2_reference.or(file_cfg
+                            .diploid
+                            .as_ref()
+                            .and_then(|d| d.parent2_reference.clone())),
+                    },
                 };
 
                 let params = AssembleParams {
@@ -271,6 +304,9 @@ async fn main() -> std::process::ExitCode {
                     strict_checkpoints,
                     simplify,
                     diploid: diploid_params,
+                    multi_k: MultiKParams {
+                        ladder: resolved_k_ladder,
+                    },
                     outputs: AssembleOutputs {
                         out_dir,
                         unitigs_fasta,
@@ -301,14 +337,36 @@ async fn run_assemble(params: AssembleParams) -> Result<(), TrexError> {
         })??;
     tracing::info!(
         reads = out.reads.len(),
+        selected_k = out.multi_k_selection.selected_k,
+        multi_k_candidates = out.multi_k_selection.candidates.len(),
         unique_kmers = out.total_unique_kmers,
         trusted_kmers = out.trusted_kmers.len(),
         unitigs = out.unitig_count,
         contigs = out.contig_count,
+        tip_decisions = out.simplify_decisions.tips.len(),
+        diamond_decisions = out.simplify_decisions.diamonds.len(),
+        evidence_records = out.evidence.records.len(),
+        bridge_candidates = out.scaffold_artifact.bridge_candidates.len(),
+        scaffold_paths = out.scaffold_artifact.paths.len(),
+        audit_findings = out.audit_report.findings.len(),
+        audit_low_support_kmers = out.audit_report.summary.low_support_kmers,
+        diploid_parent_refs = out.diploid_evidence.summary.parent_references_supplied,
+        diploid_parent_informative_unitigs = out.diploid_evidence.summary.parent_informative_unitigs,
+        full_haplotype_fasta_claimed = out.diploid_evidence.summary.full_haplotype_fasta_claimed,
+        repeat_suspected_nodes = out.graph_annotations.summary.repeat_suspected_nodes,
+        repeat_suspected_unitigs = out.graph_annotations.summary.repeat_suspected_unitigs,
         diploid = log_diploid,
         unitigs_fasta = %out.outputs.unitigs_path().display(),
         contigs_fasta = %out.outputs.contigs_path().display(),
         gfa = %out.outputs.gfa_path_resolved().display(),
+        evidence_json = %out.outputs.evidence_path().display(),
+        annotations_json = %out.outputs.annotations_path().display(),
+        simplification_json = %out.outputs.simplification_path().display(),
+        scaffolds_json = %out.outputs.scaffolds_path().display(),
+        multi_k_json = %out.outputs.multi_k_path().display(),
+        audit_json = %out.outputs.audit_json_path().display(),
+        audit_tsv = %out.outputs.audit_tsv_path().display(),
+        diploid_json = %out.outputs.diploid_path().display(),
         "assemble complete"
     );
     Ok(())

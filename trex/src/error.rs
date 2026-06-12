@@ -26,6 +26,8 @@ pub enum GraphError {
     SimplifiedSelfLoop,
     #[error("I/O error writing assembly output: {0}")]
     Io(#[from] std::io::Error),
+    #[error("JSON error writing assembly output: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// FASTQ ingest, pairing, and preprocess violations.
@@ -52,6 +54,8 @@ pub enum IngestError {
     FastqFormat(String),
     #[error("`--resume` requires `--checkpoint-root`")]
     ResumeRequiresCheckpointRoot,
+    #[error("multi-k selection does not support checkpoints yet; run without `--checkpoint-root`")]
+    MultiKCheckpointUnsupported,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

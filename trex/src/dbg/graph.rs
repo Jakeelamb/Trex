@@ -9,6 +9,54 @@ use crate::illumina::preprocess::n_free_acgt_segments;
 use crate::illumina::read::Read;
 use crate::kmer::canonical_kmer;
 
+/// Dense internal vertex id for read-only graph walks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct NodeId(pub(crate) usize);
+
+/// Read-only compact view over a [`DbgGraph`], keyed by dense [`NodeId`] values.
+///
+/// Public graph names remain canonical *k*-mer byte strings; this view is a hot-path adapter for
+/// traversal code that would otherwise repeat ordered-map lookups and clone keys during walks.
+#[derive(Debug, Clone)]
+pub(crate) struct CompactDbgGraph {
+    node_names: Vec<Vec<u8>>,
+    node_mul: Vec<u64>,
+    adj: Vec<Vec<(NodeId, u64)>>,
+}
+
+impl CompactDbgGraph {
+    pub(crate) fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        (0..self.node_names.len()).map(NodeId)
+    }
+
+    pub(crate) fn node_name(&self, id: NodeId) -> &[u8] {
+        &self.node_names[id.0]
+    }
+
+    pub(crate) fn node_name_vec(&self, id: NodeId) -> Vec<u8> {
+        self.node_names[id.0].clone()
+    }
+
+    pub(crate) fn node_mul(&self, id: NodeId) -> u64 {
+        self.node_mul[id.0]
+    }
+
+    pub(crate) fn degree(&self, id: NodeId) -> usize {
+        self.adj[id.0].len()
+    }
+
+    pub(crate) fn neighbors(&self, id: NodeId) -> &[(NodeId, u64)] {
+        &self.adj[id.0]
+    }
+
+    pub(crate) fn edge_weight(&self, a: NodeId, b: NodeId) -> u64 {
+        self.adj[a.0]
+            .iter()
+            .find_map(|(nb, weight)| (*nb == b).then_some(*weight))
+            .unwrap_or(0)
+    }
+}
+
 /// Undirected multigraph on canonical *k*-mers (adjacency lists with parallel edge multiplicity).
 #[derive(Debug, Clone)]
 pub struct DbgGraph {
@@ -30,6 +78,48 @@ impl DbgGraph {
 
     pub fn degree(&self, u: &[u8]) -> usize {
         self.adj.get(u).map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub(crate) fn compact_view(&self) -> CompactDbgGraph {
+        let mut name_to_id = BTreeMap::new();
+        for node in self.node_mul.keys() {
+            let next = NodeId(name_to_id.len());
+            name_to_id.entry(node.clone()).or_insert(next);
+        }
+        for (node, neighbors) in &self.adj {
+            let next = NodeId(name_to_id.len());
+            name_to_id.entry(node.clone()).or_insert(next);
+            for neighbor in neighbors.keys() {
+                let next = NodeId(name_to_id.len());
+                name_to_id.entry(neighbor.clone()).or_insert(next);
+            }
+        }
+
+        let mut node_names = vec![Vec::new(); name_to_id.len()];
+        let mut node_mul = vec![0u64; name_to_id.len()];
+        for (node, id) in &name_to_id {
+            node_names[id.0] = node.clone();
+            node_mul[id.0] = self.node_mul.get(node).copied().unwrap_or(0);
+        }
+
+        let mut adj = vec![Vec::new(); name_to_id.len()];
+        for (node, neighbors) in &self.adj {
+            let Some(from) = name_to_id.get(node).copied() else {
+                continue;
+            };
+            adj[from.0].reserve(neighbors.len());
+            for (neighbor, weight) in neighbors {
+                if let Some(to) = name_to_id.get(neighbor).copied() {
+                    adj[from.0].push((to, *weight));
+                }
+            }
+        }
+
+        CompactDbgGraph {
+            node_names,
+            node_mul,
+            adj,
+        }
     }
 
     pub(crate) fn add_undirected_edge(
@@ -158,5 +248,31 @@ mod tests {
         for (u, mp) in &g.adj {
             assert!(!mp.contains_key(u), "unexpected self-loop at {u:?}");
         }
+    }
+
+    #[test]
+    fn compact_view_preserves_sorted_names_multiplicity_degree_and_weights() {
+        let mut nodes = BTreeMap::new();
+        nodes.insert(b"AAA".to_vec(), 3);
+        nodes.insert(b"AAC".to_vec(), 5);
+        nodes.insert(b"ACC".to_vec(), 7);
+        let mut g = DbgGraph::new(3, nodes);
+        g.add_undirected_edge(b"AAA", b"AAC", 2).expect("edge");
+        g.add_undirected_edge(b"AAC", b"ACC", 4).expect("edge");
+
+        let compact = g.compact_view();
+        let ids: Vec<_> = compact.node_ids().collect();
+        let a = ids[0];
+        let b = ids[1];
+        let c = ids[2];
+
+        assert_eq!(ids.len(), 3);
+        assert_eq!(compact.node_name(a), b"AAA");
+        assert_eq!(compact.node_mul(b), 5);
+        assert_eq!(compact.degree(b), 2);
+        assert_eq!(compact.edge_weight(a, b), 2);
+        assert_eq!(compact.edge_weight(b, a), 2);
+        assert_eq!(compact.edge_weight(b, c), 4);
+        assert_eq!(compact.edge_weight(a, c), 0);
     }
 }

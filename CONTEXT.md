@@ -12,8 +12,13 @@ _Avoid_: MVP, toy genome (unless explicitly synthetic controls)
 Eukaryotic diploid assembly, including human-relevant repeat load and heterozygosity; phasing and diploid-specific logic belong here, not in Phase-1.
 _Avoid_: “Later”, generic scaling (be specific: diploid eukaryote)
 
+**Phase-2 Illumina endgame acceptance**:
+Trex is accepted as a governed **Illumina diploid assembler** when **Phase-1** compatibility remains green, **Phase-2 Illumina** has a tiered benchmark matrix from tiny synthetic cases through real eukaryotic or human-slice datasets, outputs include primary FASTA plus inspectable haplotype graph structure, and reproducibility, checkpointing, CI cadence, tool pins, fixture provenance, and operator docs are stable enough that a new governed matrix row can be added without redesigning the pipeline.
+_Avoid_: Treating one synthetic diploid fixture as completion, accepting aggregate contig stats without haplotype graph inspection, adding benchmark rows through ad hoc scripts or undocumented downloads
+
 **Phase-2 Illumina primary export**:
 The operator-facing **primary** contig sequence stream is a **single** FASTA representing a documented **collapse** at unresolved heterozygous sites; **haplotype-resolved** or **dual-haplotype** structure is expressed primarily in **GFA 1.0** (segments, links, paths, and Trex-documented tags), not as a mandatory pair of full-length haplotype FASTA files in the first Illumina diploid milestone. **Collapse** in that FASTA chooses **exactly one** **A/C/G/T** per column by **deterministic** rules grounded in **k-mer multiplicity** or equivalent count-derived signals, in the same spirit as **Phase-1 bubble resolution**; **IUPAC ambiguity** and **`N`** in the primary stream for SNP-level heterozygous collapse are **out of scope** unless explicitly rescoped.
+When parent references are supplied, Trex may emit parent-specific k-mer evidence in sidecars and GFA tags. That evidence is a support annotation, not a claim that emitted FASTA is fully phased or haplotype-resolved.
 _Avoid_: Treating two independent haplotype FASTAs as the default Phase-2 v1 contract, hiding diploid structure only in sidecar formats not covered by Trex GFA documentation, stochastic or undocumented tie-breaks at het collapse, default IUPAC or **N** in the primary FASTA for simple hets
 
 **Phase-2 mate usage (Illumina)**:
@@ -125,8 +130,8 @@ The de Bruijn graph on *k*-mers; Phase-1 contigging is defined as well-defined t
 _Avoid_: Overlap graph, string graph, dual IR (for Phase-1 scope)
 
 **Phase-1 k policy**:
-Exactly one user-chosen *k* per assembly run; one de Bruijn graph is built at that *k* without an internal multi-*k* ladder or automatic *k* switching.
-_Avoid_: Multi-*k* within one run, hidden *k* selection (for Phase-1)
+By default, exactly one user-chosen *k* per assembly run; one de Bruijn graph is built at that *k* without an internal multi-*k* ladder or automatic *k* switching. Explicit `--kmer-ladder` / `k_ladder` mode may build and score candidate graphs, but it must be opt-in, emit `multi_k.json`, select only one graph for the normal assembly path, and avoid checkpoint reuse until selected-*k* checkpoint identity is implemented.
+_Avoid_: Hidden *k* selection, graph merging across *k* values, or treating explicit multi-*k* mode as the Phase-1 default
 
 **Phase-1 k feasibility**:
 If *k* exceeds the **shortest post-preprocess read length** among all reads feeding the run, **`trex-cli`** fails with a **hard error** before *k*-mer enumeration rather than clamping *k* or completing a meaningless count pass in Phase-1.

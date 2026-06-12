@@ -11,6 +11,10 @@ license = "in_repo"
 provenance = "fixtures/phase2_synthetic"
 depth_class = "smoke"
 ci_tier = "pr"
+product_claim = "Phase-2 Illumina synthetic diploid smoke gate preserves parent-aware graph and primary FASTA contracts."
+claim_level = "production-gated"
+reference_availability = "parental_haplotypes"
+artifact_policy = "required"
 fixtures = [
   "fixtures/phase2_synthetic/parent1.fa",
   "fixtures/phase2_synthetic/parent2.fa",
@@ -30,15 +34,42 @@ nightly_scripts = [
   "scripts/phase2_illumina_benchmark_gate.sh",
   "scripts/reference_quast.sh",
 ]
+required_tools = ["bash", "cargo"]
 optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/phase2-graph-summaries/contigs.fa",
   "target/phase2-graph-summaries/graph.gfa",
+  "target/phase2-graph-summaries/diploid.json",
 ]
 nightly_artifacts = [
   "target/quast-phase2-synthetic/combined_reference/report.tsv",
 ]
 notes = "Default developer + PR path: substring + optional minimap2 + trex diploid assemble smoke."
+
+[rows.trex]
+tiers = ["nightly", "manual"]
+out_dir = "target/phase2-graph-summaries"
+parental_references = [
+  { label = "parent1", path = "fixtures/phase2_synthetic/parent1.fa" },
+  { label = "parent2", path = "fixtures/phase2_synthetic/parent2.fa" },
+]
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "fixtures/phase2_synthetic/reads.fq",
+  "--kmer-size",
+  "4",
+  "--trusted-threshold",
+  "1",
+  "--diploid",
+  "--parent1-reference",
+  "fixtures/phase2_synthetic/parent1.fa",
+  "--parent2-reference",
+  "fixtures/phase2_synthetic/parent2.fa",
+  "--out-dir",
+  "target/phase2-graph-summaries",
+]
 
 [[rows]]
 id = "phase1_ref_free_golden"
@@ -48,6 +79,10 @@ license = "in_repo"
 provenance = "fixtures used by scripts/ref_free_smoke.sh"
 depth_class = "smoke"
 ci_tier = "pr"
+product_claim = "Phase-1 reference-free golden output stays byte-stable for the tiny Illumina fixture."
+claim_level = "production-gated"
+reference_availability = "single_reference"
+artifact_policy = "required"
 fixtures = [
   "fixtures/tiny.fq",
   "fixtures/tiny_ref.fa",
@@ -60,6 +95,7 @@ main_scripts = [
   "scripts/benchmark_gate.sh",
   "scripts/reference_smoke.sh",
 ]
+required_tools = ["bash", "cargo"]
 optional_tools = ["minimap2"]
 artifacts = [
   "target/ref-free-smoke/contigs.fa",
@@ -76,12 +112,17 @@ license = "public_ncbi_refseq"
 provenance = "NCBI RefSeq NC_001422.1 via E-utilities; deterministic synthetic reads generated from the pinned reference"
 depth_class = "micro_real_reference"
 ci_tier = "nightly"
+product_claim = "Trex can assemble a real public micro-reference row and emit reference-backed and read-backed k-mer quality metrics."
+claim_level = "benchmarked"
+reference_availability = "single_reference"
+artifact_policy = "required"
 fixtures = [
   "fixtures/phix174/reference.fa",
   "fixtures/phix174/reads.fq",
 ]
 digest_manifest = "tools/manifest.toml"
 manifest_table = "fixtures.phix174"
+required_tools = ["cargo"]
 optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/benchmarks/phix174/trex/contigs.fa",
@@ -115,6 +156,10 @@ license = "public_ena"
 provenance = "ENA SRR001666; first 1000 read pairs prepared by xtask fetch-data from md5-pinned FASTQ sources"
 depth_class = "bacterial_real_reads_profile_1k_pairs"
 ci_tier = "manual"
+product_claim = "Trex manual bacterial profiling starts from a bounded E. coli MG1655 paired-end read rung."
+claim_level = "benchmarked"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
 external_data = "ecoli_mg1655_srr001666"
 fixtures = [
   "data/benchmarks/ecoli_mg1655_srr001666/reference.fa",
@@ -123,6 +168,7 @@ fixtures = [
 ]
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.ecoli_mg1655_srr001666_1k_pairs"
+required_tools = ["cargo"]
 optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/benchmarks/ecoli_mg1655_srr001666_1k_pairs/trex/contigs.fa",
@@ -161,6 +207,10 @@ license = "public_ena; public_ncbi_refseq"
 provenance = "ENA SRR001666 first 10000 read pairs plus NCBI RefSeq GCF_000005845.2 / NC_000913.3 MG1655 reference"
 depth_class = "bacterial_real_reads_profile_10k_pairs"
 ci_tier = "manual"
+product_claim = "Trex manual bacterial scale-up profiling covers the 10k-pair E. coli MG1655 rung."
+claim_level = "benchmarked"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
 external_data = "ecoli_mg1655_srr001666"
 fixtures = [
   "data/benchmarks/ecoli_mg1655_srr001666/reference.fa",
@@ -169,6 +219,7 @@ fixtures = [
 ]
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.ecoli_mg1655_srr001666_10k_pairs"
+required_tools = ["cargo"]
 optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/benchmarks/ecoli_mg1655_srr001666_10k_pairs/trex/contigs.fa",
@@ -207,6 +258,10 @@ license = "public_ena; public_ncbi_refseq"
 provenance = "ENA SRR001666 first 100000 read pairs plus NCBI RefSeq GCF_000005845.2 / NC_000913.3 MG1655 reference"
 depth_class = "bacterial_real_reads_profile_100k_pairs"
 ci_tier = "manual"
+product_claim = "Trex manual bacterial profiling has a 100k-pair E. coli MG1655 scaling sentinel."
+claim_level = "benchmarked"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
 external_data = "ecoli_mg1655_srr001666"
 fixtures = [
   "data/benchmarks/ecoli_mg1655_srr001666/reference.fa",
@@ -215,6 +270,7 @@ fixtures = [
 ]
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.ecoli_mg1655_srr001666_100k_pairs"
+required_tools = ["cargo"]
 optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/benchmarks/ecoli_mg1655_srr001666_100k_pairs/trex/contigs.fa",
@@ -253,6 +309,10 @@ license = "public_ena; ploidy_table_cc_by_4_0"
 provenance = "ENA ERR1308583 from 1002 Yeast Genomes; BTT accession 1308583 is euploid diploid in the pinned ploidy table"
 depth_class = "diploid_eukaryotic_real_reads_profile_1k_pairs"
 ci_tier = "manual"
+product_claim = "Trex manual diploid eukaryotic profiling starts from a bounded BTT yeast paired-end read rung."
+claim_level = "benchmarked"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
 external_data = "yeast_btt_err1308583"
 fixtures = [
   "data/benchmarks/yeast_btt_err1308583/reference.fa",
@@ -261,6 +321,7 @@ fixtures = [
 ]
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.yeast_btt_err1308583_diploid_1k_pairs"
+required_tools = ["cargo"]
 optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/benchmarks/yeast_btt_err1308583_diploid_1k_pairs/trex/contigs.fa",
@@ -300,6 +361,10 @@ license = "public_ena; ploidy_table_cc_by_4_0"
 provenance = "ENA ERR1308583 from 1002 Yeast Genomes; BTT accession 1308583 is euploid diploid in the pinned ploidy table"
 depth_class = "diploid_eukaryotic_real_reads_profile_10k_pairs"
 ci_tier = "manual"
+product_claim = "Trex manual diploid eukaryotic profiling has a 10k-pair BTT yeast scaling rung."
+claim_level = "benchmarked"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
 external_data = "yeast_btt_err1308583"
 fixtures = [
   "data/benchmarks/yeast_btt_err1308583/reference.fa",
@@ -308,6 +373,7 @@ fixtures = [
 ]
 digest_manifest = "tools/manifest.toml"
 manifest_table = "external.yeast_btt_err1308583_diploid_10k_pairs"
+required_tools = ["cargo"]
 optional_tools = ["minimap2", "quast"]
 artifacts = [
   "target/benchmarks/yeast_btt_err1308583_diploid_10k_pairs/trex/contigs.fa",
