@@ -81,7 +81,7 @@ This keeps Phase-2 experimentation from invalidating Phase-1 count semantics and
 - The edge between them must already exist in the DBG.
 - A successful bridge increments only that edge weight by 1.
 
-This is an adjacency-strength signal, not primary FASTA mutation and not distance-sensitive gap inference. `scaffolds.json` may promote high-confidence dead-end endpoint joins into sidecar scaffold/path records only when support is unconflicted, the endpoint is not in a competing join cluster, and the distance confidence clears the documented promotion threshold. When accepted scaffold paths exist, Trex also writes a separate `scaffolds.fa` sequence sidecar using explicit `N` gaps for positive mate-estimated distances and known DBG overlap trimming for existing-edge joins; it never replaces `contigs.fa`. The insert mean currently participates in mode identity and enables the bridge; richer insert-distribution bubble surgery is future work.
+This is an adjacency-strength signal, not primary FASTA mutation and not distance-sensitive gap inference. `scaffolds.json` schema v6 represents each mate signal as a k-bimer-like constraint with a stable `kbm...` id, R1-tail/R2-head graph contexts, orientation, distance bin, support histogram, and blocker reasons. High-confidence dead-end endpoint joins may promote into sidecar scaffold/path records only when support is unconflicted, the endpoint is not in a competing join cluster, and the distance confidence clears the documented promotion threshold. When accepted scaffold paths exist, Trex also writes a separate `scaffolds.fa` sequence sidecar using explicit `N` gaps for positive mate-estimated distances and known DBG overlap trimming for existing-edge joins; it never replaces `contigs.fa`. The insert mean currently participates in mode identity and enables the bridge; richer insert-distribution bubble surgery is future work.
 
 ### Diploid Simplification
 
@@ -192,7 +192,7 @@ Shipped experimental Phase-2 Illumina functionality:
 
 - `trex illumina assemble --diploid` and `[assemble.diploid]`
 - graph checkpoint identity for diploid mode, paired input, insert prior fields, and mate-bridge version
-- mate-pair bridge on existing DBG edges only
+- mate-pair bridge on existing DBG edges only, with k-bimer-like constraint records in `scaffolds.json`
 - conflict-aware endpoint join acceptance in `scaffolds.json` sidecar paths
 - separate `scaffolds.fa` sidecar from accepted scaffold paths
 - near-balanced diamond retention

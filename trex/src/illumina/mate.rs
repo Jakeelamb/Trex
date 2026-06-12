@@ -17,6 +17,37 @@ pub enum MatePairOrientation {
     R1TailToR2Head,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MateGraphSide {
+    Tail,
+    Head,
+}
+
+impl MateGraphSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tail => "tail",
+            Self::Head => "head",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MateGraphContext {
+    pub node: String,
+    pub side: String,
+}
+
+impl MateGraphContext {
+    pub fn new(node: String, side: MateGraphSide) -> Self {
+        Self {
+            node,
+            side: side.as_str().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MateDistanceEvidence {
     pub insert_mean_bp: u64,
@@ -26,16 +57,147 @@ pub struct MateDistanceEvidence {
     pub confidence: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MateDistanceClass {
+    Overlap,
+    Touching,
+    Gap,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MateDistanceBin {
+    pub class: MateDistanceClass,
+    pub estimated_gap_bp: Option<i64>,
+}
+
+impl MateDistanceBin {
+    pub fn from_distance(distance: Option<&MateDistanceEvidence>) -> Self {
+        let Some(distance) = distance else {
+            return Self {
+                class: MateDistanceClass::Unknown,
+                estimated_gap_bp: None,
+            };
+        };
+        let class = match distance.estimated_gap_bp.cmp(&0) {
+            std::cmp::Ordering::Less => MateDistanceClass::Overlap,
+            std::cmp::Ordering::Equal => MateDistanceClass::Touching,
+            std::cmp::Ordering::Greater => MateDistanceClass::Gap,
+        };
+        Self {
+            class,
+            estimated_gap_bp: Some(distance.estimated_gap_bp),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MateSupportHistogram {
+    pub support_pairs: usize,
+    pub same_from_pairs: usize,
+    pub same_to_pairs: usize,
+    pub same_pair_pairs: usize,
+    pub conflict_pairs: usize,
+    pub distance_confidence: u64,
+}
+
+impl MateSupportHistogram {
+    pub fn new(
+        support_pairs: usize,
+        same_from_pairs: usize,
+        same_to_pairs: usize,
+        same_pair_pairs: usize,
+        conflict_pairs: usize,
+        distance_confidence: u64,
+    ) -> Self {
+        Self {
+            support_pairs,
+            same_from_pairs,
+            same_to_pairs,
+            same_pair_pairs,
+            conflict_pairs,
+            distance_confidence,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MateBridgeCandidate {
+    pub constraint_id: String,
+    pub from_node: String,
+    pub to_node: String,
+    pub from_context: MateGraphContext,
+    pub to_context: MateGraphContext,
+    pub orientation: MatePairOrientation,
+    pub distance: Option<MateDistanceEvidence>,
+    pub distance_bin: MateDistanceBin,
+    pub support_pairs: usize,
+    pub conflict_pairs: usize,
+    pub support_histogram: MateSupportHistogram,
+    pub score: u64,
+    pub existing_dbg_edge: bool,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MateBridgeCandidateParts {
+    pub constraint_id: String,
     pub from_node: String,
     pub to_node: String,
     pub orientation: MatePairOrientation,
     pub distance: Option<MateDistanceEvidence>,
     pub support_pairs: usize,
+    pub same_from_pairs: usize,
+    pub same_to_pairs: usize,
+    pub same_pair_pairs: usize,
     pub conflict_pairs: usize,
-    pub score: u64,
     pub existing_dbg_edge: bool,
+}
+
+impl MateBridgeCandidate {
+    pub fn from_constraint_parts(parts: MateBridgeCandidateParts) -> Self {
+        let score = score_candidate(
+            parts.support_pairs,
+            parts.conflict_pairs,
+            parts.distance.as_ref(),
+        );
+        let distance_confidence = parts
+            .distance
+            .as_ref()
+            .map(|distance| distance.confidence)
+            .unwrap_or(0);
+        let distance_bin = MateDistanceBin::from_distance(parts.distance.as_ref());
+        let support_histogram = MateSupportHistogram::new(
+            parts.support_pairs,
+            parts.same_from_pairs,
+            parts.same_to_pairs,
+            parts.same_pair_pairs,
+            parts.conflict_pairs,
+            distance_confidence,
+        );
+        let blockers = constraint_blockers(
+            parts.existing_dbg_edge,
+            parts.conflict_pairs,
+            parts.distance.as_ref(),
+        );
+        Self {
+            constraint_id: parts.constraint_id,
+            from_context: MateGraphContext::new(parts.from_node.clone(), MateGraphSide::Tail),
+            to_context: MateGraphContext::new(parts.to_node.clone(), MateGraphSide::Head),
+            from_node: parts.from_node,
+            to_node: parts.to_node,
+            orientation: parts.orientation,
+            distance: parts.distance,
+            distance_bin,
+            support_pairs: parts.support_pairs,
+            conflict_pairs: parts.conflict_pairs,
+            support_histogram,
+            score,
+            existing_dbg_edge: parts.existing_dbg_edge,
+            blockers,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,6 +305,30 @@ fn score_candidate(
         .saturating_sub((conflict_pairs as u64).saturating_mul(100))
 }
 
+fn constraint_blockers(
+    existing_dbg_edge: bool,
+    conflict_pairs: usize,
+    distance: Option<&MateDistanceEvidence>,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if !existing_dbg_edge {
+        blockers.push("absent_dbg_edge_no_graph_edit".to_string());
+    }
+    if conflict_pairs > 0 {
+        blockers.push("conflicting_endpoint_support".to_string());
+    }
+    match distance {
+        Some(distance) if distance.confidence == 0 => {
+            blockers.push("zero_distance_confidence".to_string());
+        }
+        None => {
+            blockers.push("missing_insert_distance".to_string());
+        }
+        _ => {}
+    }
+    blockers
+}
+
 /// For each mate pair, if **R1**'s last forward *k*-mer and **R2**'s first forward *k*-mer are both
 /// trusted vertices and already adjacent in the **DBG**, increment that undirected edge weight by **1**.
 ///
@@ -221,8 +407,9 @@ pub fn boost_mate_pairs_on_existing_dbg_edges(
     }
     stats.candidates = candidates
         .into_iter()
+        .enumerate()
         .map(
-            |((from, to, orientation, distance, existing_dbg_edge), support_pairs)| {
+            |(idx, ((from, to, orientation, distance, existing_dbg_edge), support_pairs))| {
                 let same_from = from_support.get(&from).copied().unwrap_or(0);
                 let same_to = to_support.get(&to).copied().unwrap_or(0);
                 let same_pair = pair_support
@@ -232,17 +419,21 @@ pub fn boost_mate_pairs_on_existing_dbg_edges(
                 let conflict_pairs = same_from
                     .saturating_add(same_to)
                     .saturating_sub(same_pair * 2);
-                let score = score_candidate(support_pairs, conflict_pairs, distance.as_ref());
-                MateBridgeCandidate {
-                    from_node: node_label(&from),
-                    to_node: node_label(&to),
+                let from_node = node_label(&from);
+                let to_node = node_label(&to);
+                MateBridgeCandidate::from_constraint_parts(MateBridgeCandidateParts {
+                    constraint_id: format!("kbm{:06}", idx + 1),
+                    from_node,
+                    to_node,
                     orientation,
                     distance,
                     support_pairs,
+                    same_from_pairs: same_from,
+                    same_to_pairs: same_to,
+                    same_pair_pairs: same_pair,
                     conflict_pairs,
-                    score,
                     existing_dbg_edge,
-                }
+                })
             },
         )
         .collect();
@@ -251,7 +442,10 @@ pub fn boost_mate_pairs_on_existing_dbg_edges(
 
 #[cfg(test)]
 mod tests {
-    use super::{boost_mate_pairs_on_existing_dbg_edges, MateBridgeStats, MatePairOrientation};
+    use super::{
+        boost_mate_pairs_on_existing_dbg_edges, MateBridgeStats, MateDistanceClass,
+        MatePairOrientation,
+    };
     use crate::dbg::graph::DbgGraph;
     use crate::evidence::{EvidenceKind, EvidenceSourceStage};
     use crate::illumina::read::Read;
@@ -309,6 +503,11 @@ mod tests {
         assert_eq!(stats.candidates.len(), 1);
         assert_eq!(stats.candidates[0].from_node, "ACGT");
         assert_eq!(stats.candidates[0].to_node, "CGTA");
+        assert_eq!(stats.candidates[0].constraint_id, "kbm000001");
+        assert_eq!(stats.candidates[0].from_context.node, "ACGT");
+        assert_eq!(stats.candidates[0].from_context.side, "tail");
+        assert_eq!(stats.candidates[0].to_context.node, "CGTA");
+        assert_eq!(stats.candidates[0].to_context.side, "head");
         assert_eq!(
             stats.candidates[0].orientation,
             MatePairOrientation::R1TailToR2Head
@@ -327,8 +526,22 @@ mod tests {
                 .map(|distance| distance.confidence),
             Some(84)
         );
+        assert_eq!(
+            stats.candidates[0].distance_bin.class,
+            MateDistanceClass::Gap
+        );
+        assert_eq!(stats.candidates[0].distance_bin.estimated_gap_bp, Some(4));
         assert_eq!(stats.candidates[0].support_pairs, 1);
         assert_eq!(stats.candidates[0].conflict_pairs, 0);
+        assert_eq!(stats.candidates[0].support_histogram.support_pairs, 1);
+        assert_eq!(stats.candidates[0].support_histogram.same_from_pairs, 1);
+        assert_eq!(stats.candidates[0].support_histogram.same_to_pairs, 1);
+        assert_eq!(stats.candidates[0].support_histogram.same_pair_pairs, 1);
+        assert_eq!(
+            stats.candidates[0].support_histogram.distance_confidence,
+            84
+        );
+        assert!(stats.candidates[0].blockers.is_empty());
         assert_eq!(stats.candidates[0].score, 184);
         assert!(stats.candidates[0].existing_dbg_edge);
     }
@@ -374,6 +587,14 @@ mod tests {
                 .map(|distance| distance.confidence),
             Some(50)
         );
+        assert_eq!(
+            stats.candidates[0].distance_bin.class,
+            MateDistanceClass::Gap
+        );
+        assert_eq!(
+            stats.candidates[0].blockers,
+            vec!["absent_dbg_edge_no_graph_edit".to_string()]
+        );
         assert_eq!(stats.candidates[0].score, 150);
         assert!(!stats.candidates[0].existing_dbg_edge);
         assert_eq!(graph.degree(b"ACGT"), 0);
@@ -417,6 +638,9 @@ mod tests {
             candidate.from_node == "ACGT"
                 && candidate.support_pairs == 1
                 && candidate.conflict_pairs == 1
+                && candidate
+                    .blockers
+                    .contains(&"conflicting_endpoint_support".to_string())
                 && candidate.score == 50
         }));
     }

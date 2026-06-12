@@ -121,7 +121,9 @@ impl EndpointJoinPromotionPolicy {
 #[cfg(test)]
 mod tests {
     use super::{EndpointJoinPromotionPolicy, PromotionStage};
-    use crate::illumina::mate::{MateBridgeCandidate, MateDistanceEvidence, MatePairOrientation};
+    use crate::illumina::mate::{
+        MateBridgeCandidate, MateBridgeCandidateParts, MateDistanceEvidence, MatePairOrientation,
+    };
 
     fn candidate(
         support_pairs: usize,
@@ -129,7 +131,8 @@ mod tests {
         confidence: u64,
         existing_dbg_edge: bool,
     ) -> MateBridgeCandidate {
-        MateBridgeCandidate {
+        MateBridgeCandidate::from_constraint_parts(MateBridgeCandidateParts {
+            constraint_id: "kbm000001".to_string(),
             from_node: "AAC".to_string(),
             to_node: "ACC".to_string(),
             orientation: MatePairOrientation::R1TailToR2Head,
@@ -141,10 +144,12 @@ mod tests {
                 confidence,
             }),
             support_pairs,
+            same_from_pairs: support_pairs,
+            same_to_pairs: support_pairs,
+            same_pair_pairs: support_pairs,
             conflict_pairs,
-            score: support_pairs as u64 * 100 + confidence,
             existing_dbg_edge,
-        }
+        })
     }
 
     #[test]

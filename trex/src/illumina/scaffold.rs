@@ -5,11 +5,14 @@ use serde::{Deserialize, Serialize};
 use crate::illumina::fragmentation::{
     FragmentEndpointReport, FragmentStopReason, FragmentationReport,
 };
-use crate::illumina::mate::{MateBridgeCandidate, MateDistanceEvidence, MatePairOrientation};
+use crate::illumina::mate::{
+    MateBridgeCandidate, MateDistanceBin, MateDistanceEvidence, MateGraphContext,
+    MatePairOrientation, MateSupportHistogram,
+};
 use crate::illumina::promotion::{EndpointJoinPromotionPolicy, PromotionPolicySnapshot};
 use crate::kmer::reverse_complement;
 
-pub const SCAFFOLD_ARTIFACT_SCHEMA_VERSION: u64 = 5;
+pub const SCAFFOLD_ARTIFACT_SCHEMA_VERSION: u64 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScaffoldStep {
@@ -19,15 +22,21 @@ pub struct ScaffoldStep {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScaffoldLink {
+    pub constraint_id: String,
     pub from_segment: String,
     pub from_orient: char,
     pub to_segment: String,
     pub to_orient: char,
+    pub from_context: MateGraphContext,
+    pub to_context: MateGraphContext,
     pub orientation: MatePairOrientation,
     pub distance: Option<MateDistanceEvidence>,
+    pub distance_bin: MateDistanceBin,
     pub overlap_cigar: String,
     pub support_pairs: usize,
     pub conflict_pairs: usize,
+    pub support_histogram: MateSupportHistogram,
+    pub blockers: Vec<String>,
     pub source: String,
 }
 
@@ -41,19 +50,25 @@ pub struct ScaffoldPath {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointJoinCandidate {
     pub id: String,
+    pub constraint_id: String,
     pub from_contig: String,
     pub from_side: String,
     pub from_node: String,
     pub to_contig: String,
     pub to_side: String,
     pub to_node: String,
+    pub from_context: MateGraphContext,
+    pub to_context: MateGraphContext,
     pub orientation: MatePairOrientation,
     pub distance: Option<MateDistanceEvidence>,
+    pub distance_bin: MateDistanceBin,
     pub support_pairs: usize,
     pub conflict_pairs: usize,
+    pub support_histogram: MateSupportHistogram,
     pub conflict_cluster_size: usize,
     pub score: u64,
     pub existing_dbg_edge: bool,
+    pub blockers: Vec<String>,
     pub promotion_stage: String,
     pub accepted: bool,
     pub rejection_reason: Option<String>,
@@ -211,15 +226,21 @@ pub fn build_scaffold_artifact(
                 },
             ],
             links: vec![ScaffoldLink {
+                constraint_id: candidate.constraint_id.clone(),
                 from_segment,
                 from_orient,
                 to_segment,
                 to_orient,
+                from_context: candidate.from_context.clone(),
+                to_context: candidate.to_context.clone(),
                 orientation: candidate.orientation,
                 distance: candidate.distance.clone(),
+                distance_bin: candidate.distance_bin.clone(),
                 overlap_cigar: overlap_cigar.clone(),
                 support_pairs: candidate.support_pairs,
                 conflict_pairs: candidate.conflict_pairs,
+                support_histogram: candidate.support_histogram.clone(),
+                blockers: candidate.blockers.clone(),
                 source: if candidate.existing_dbg_edge {
                     "mate_bridge_existing_edge"
                 } else {
@@ -283,19 +304,25 @@ fn ranked_endpoint_joins(
             let rejection_reason = decision.rejection_reason.map(str::to_string);
             Some(EndpointJoinCandidate {
                 id: String::new(),
+                constraint_id: candidate.constraint_id.clone(),
                 from_contig: from.contig.clone(),
                 from_side: from.side.clone(),
                 from_node: candidate.from_node.clone(),
                 to_contig: to.contig.clone(),
                 to_side: to.side.clone(),
                 to_node: candidate.to_node.clone(),
+                from_context: candidate.from_context.clone(),
+                to_context: candidate.to_context.clone(),
                 orientation: candidate.orientation,
                 distance: candidate.distance.clone(),
+                distance_bin: candidate.distance_bin.clone(),
                 support_pairs: candidate.support_pairs,
                 conflict_pairs: candidate.conflict_pairs,
+                support_histogram: candidate.support_histogram.clone(),
                 conflict_cluster_size,
                 score: candidate.score,
                 existing_dbg_edge: candidate.existing_dbg_edge,
+                blockers: candidate.blockers.clone(),
                 promotion_stage,
                 accepted,
                 rejection_reason,
@@ -406,7 +433,9 @@ mod tests {
         FragmentEndpointReport, FragmentStopReason, FragmentationReport, FragmentationSummary,
         FRAGMENTATION_REPORT_SCHEMA_VERSION,
     };
-    use crate::illumina::mate::{MateBridgeCandidate, MateDistanceEvidence, MatePairOrientation};
+    use crate::illumina::mate::{
+        MateBridgeCandidate, MateBridgeCandidateParts, MateDistanceEvidence, MatePairOrientation,
+    };
 
     fn fragmentation(endpoints: Vec<FragmentEndpointReport>) -> FragmentationReport {
         FragmentationReport {
@@ -460,16 +489,19 @@ mod tests {
             estimated_gap_bp: 4,
             confidence: 80,
         });
-        MateBridgeCandidate {
+        MateBridgeCandidate::from_constraint_parts(MateBridgeCandidateParts {
+            constraint_id: "kbm000001".to_string(),
             from_node: from_node.to_string(),
             to_node: to_node.to_string(),
             orientation: MatePairOrientation::R1TailToR2Head,
             distance,
             support_pairs,
+            same_from_pairs: support_pairs,
+            same_to_pairs: support_pairs,
+            same_pair_pairs: support_pairs,
             conflict_pairs,
-            score: (support_pairs as u64) * 100 + 80,
             existing_dbg_edge,
-        }
+        })
     }
 
     #[test]
@@ -488,8 +520,12 @@ mod tests {
         let artifact = build_scaffold_artifact(&candidates, &unitigs, 3, &frag);
 
         assert_eq!(artifact.bridge_candidates, candidates);
+        assert_eq!(artifact.schema_version, 6);
         assert_eq!(artifact.endpoint_join_candidates.len(), 1);
         assert_eq!(artifact.paths.len(), 1);
+        assert_eq!(artifact.paths[0].links[0].constraint_id, "kbm000001");
+        assert_eq!(artifact.paths[0].links[0].from_context.side, "tail");
+        assert_eq!(artifact.paths[0].links[0].to_context.side, "head");
         assert_eq!(artifact.paths[0].steps[0].segment, "utg000001");
         assert_eq!(artifact.paths[0].steps[1].segment, "utg000002");
         assert_eq!(artifact.paths[0].links[0].overlap_cigar, "2M");
@@ -544,6 +580,24 @@ mod tests {
         assert_eq!(artifact.bridge_candidates.len(), 1);
         assert_eq!(artifact.endpoint_join_candidates.len(), 1);
         assert_eq!(artifact.endpoint_join_candidates[0].id, "ejc000001");
+        assert_eq!(
+            artifact.endpoint_join_candidates[0].constraint_id,
+            "kbm000001"
+        );
+        assert_eq!(
+            artifact.endpoint_join_candidates[0].from_context.node,
+            "AAC"
+        );
+        assert_eq!(artifact.endpoint_join_candidates[0].to_context.node, "ACC");
+        assert_eq!(
+            artifact.endpoint_join_candidates[0]
+                .support_histogram
+                .support_pairs,
+            5
+        );
+        assert!(artifact.endpoint_join_candidates[0]
+            .blockers
+            .contains(&"absent_dbg_edge_no_graph_edit".to_string()));
         assert!(artifact.endpoint_join_candidates[0].accepted);
         assert_eq!(
             artifact.endpoint_join_candidates[0].promotion_stage,

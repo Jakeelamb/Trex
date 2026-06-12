@@ -383,6 +383,12 @@ fn phase2_mate_bridge_reports_typed_evidence_counters() {
     assert!(scaffolds_text.contains("\"orientation\""));
     assert!(scaffolds_text.contains("\"r1_tail_to_r2_head\""));
     assert!(scaffolds_text.contains("\"estimated_gap_bp\""));
+    assert!(scaffolds_text.contains("\"constraint_id\""));
+    assert!(scaffolds_text.contains("\"kbm000001\""));
+    assert!(scaffolds_text.contains("\"from_context\""));
+    assert!(scaffolds_text.contains("\"distance_bin\""));
+    assert!(scaffolds_text.contains("\"support_histogram\""));
+    assert!(scaffolds_text.contains("\"blockers\""));
 }
 
 #[test]
@@ -540,6 +546,8 @@ fn mate_endpoint_join_candidates_are_report_only_for_missing_dbg_edges() {
     assert!(scaffolds.contains("\"orientation\""));
     assert!(scaffolds.contains("\"estimated_gap_bp\""));
     assert!(scaffolds.contains("\"confidence\""));
+    assert!(scaffolds.contains("\"absent_dbg_edge_no_graph_edit\""));
+    assert!(scaffolds.contains("\"support_histogram\""));
 }
 
 #[test]

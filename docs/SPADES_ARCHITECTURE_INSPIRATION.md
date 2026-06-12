@@ -20,7 +20,7 @@ promotion-policy architecture on the single `trex illumina assemble` surface.
 |--------------------|---------------------|----------------------------|
 | Read correction before graph construction | Separate read trust from graph mutation. Trusted k-mers, correction candidates, rejected spans, and support summaries should be visible before any corrected reads are allowed to influence the graph. | `read_correction_trust` emits report-only correction/trust diagnostics. |
 | Multi-*k* assembly as a ladder | Treat *k* values as independent evidence snapshots, not a hidden auto parameter. Start with select-one behavior, then use cross-*k* signals as annotations before any graph merge. | `multi_k_graph_ladder` records completeness, branchiness, dead ends, repeat risk, and selected-*k* checkpoint provenance. |
-| Paired de Bruijn / k-bimer thinking | Mate pairs are constraints between graph contexts with orientation and distance confidence, not just endpoint counters. | `mate_evidence` grows from endpoint joins into k-bimer-like path constraints and conflict clusters. |
+| Paired de Bruijn / k-bimer thinking | Mate pairs are constraints between graph contexts with orientation and distance confidence, not just endpoint counters. | `mate_evidence` emits k-bimer-like constraint IDs, graph contexts, distance bins, support histograms, blockers, endpoint joins, and path links. |
 | Iterative simplification | Graph edits should be followed by recompression, reannotation, and replanning so later decisions see the current topology. | `simplification_policy` gains an edit/recompress/reannotate/replan scheduler. |
 | Bulge projection rather than blind deletion | When a branch is collapsed, retain enough provenance to explain where it went and to reuse it for future repeat/path reasoning. | `simplification.json` records projected/retained structures; GFA/path exports can cite them later. |
 | Contextual coverage | Coverage interpretation must be local. metaSPAdes shows why one global coverage threshold breaks under uneven depth and related strains. | `repeat_annotation` and `simplification_policy` use local ratios and adjacent-edge context, not only global multiplicity floors. |
@@ -51,8 +51,9 @@ promotion-policy architecture on the single `trex illumina assemble` surface.
    graph-density pressure, weighted score terms, and selected-*k* checkpoint
    provenance.
 3. **K-bimer-like mate constraints**: represent mate evidence as oriented
-   constraints between graph contexts with insert-distance histograms, support,
-   conflict clusters, and blocker reasons.
+   constraints between graph contexts with insert-distance bins, support
+   histograms, conflict clusters, and blocker reasons. The first shipped surface
+   is `scaffolds.json` schema v6; stronger path resolution remains policy-gated.
 4. **Iterative simplification scheduler**: run planned edit, record
    recompress/reannotation hook status, replan the next pass from the current
    topology, and preserve decision ids across passes.
