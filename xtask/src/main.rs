@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1942,6 +1943,7 @@ fn run_trex_bench(root: &Path, trex: &TrexBench) -> DynResult<TrexRunReport> {
     )?;
     let mut command = vec!["target/release/trex".to_string()];
     command.extend(trex.args.clone());
+    clean_trex_bench_outputs(root, trex)?;
 
     println!("xtask bench: running {}", command.join(" "));
     let start = std::time::Instant::now();
@@ -2191,13 +2193,7 @@ fn run_optional_quast(root: &Path, trex: &TrexBench) -> DynResult<Option<ScriptR
     if !asm.exists() {
         return Ok(None);
     }
-    let quast_out = root.join(&trex.out_dir).with_file_name(format!(
-        "{}-quast",
-        Path::new(&trex.out_dir)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("trex")
-    ));
+    let quast_out = quast_output_dir(root, trex);
     let script = "scripts/reference_quast.sh";
     println!("xtask bench: running optional QUAST for {}", trex.out_dir);
     let start = std::time::Instant::now();
@@ -2243,6 +2239,58 @@ fn run_optional_quast(root: &Path, trex: &TrexBench) -> DynResult<Option<ScriptR
         time_seconds,
         max_rss_kib,
     }))
+}
+
+fn clean_trex_bench_outputs(root: &Path, trex: &TrexBench) -> DynResult<()> {
+    let out_dir = root.join(&trex.out_dir);
+    remove_safe_target_output(root, &out_dir, "trex.out_dir")?;
+    let quast_out = quast_output_dir(root, trex);
+    remove_safe_target_output(root, &quast_out, "trex QUAST output")?;
+    Ok(())
+}
+
+fn quast_output_dir(root: &Path, trex: &TrexBench) -> PathBuf {
+    root.join(&trex.out_dir).with_file_name(format!(
+        "{}-quast",
+        Path::new(&trex.out_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("trex")
+    ))
+}
+
+fn remove_safe_target_output(root: &Path, path: &Path, label: &str) -> DynResult<()> {
+    let rel = path.strip_prefix(root).map_err(|_| {
+        format!(
+            "refusing to remove {label} outside repo root: {}",
+            path.display()
+        )
+    })?;
+    if !is_safe_target_output_path(rel) {
+        return Err(format!("refusing to remove unsafe {label} path: {}", rel.display()).into());
+    }
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn is_safe_target_output_path(rel: &Path) -> bool {
+    let mut components = rel.components();
+    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("target"))) {
+        return false;
+    }
+    let mut depth = 1usize;
+    for component in components {
+        match component {
+            Component::Normal(_) => depth += 1,
+            _ => return false,
+        }
+    }
+    depth >= 2
 }
 
 fn parse_trex_observed(stdout: &str) -> Option<TrexObserved> {
@@ -3772,6 +3820,49 @@ mod tests {
             std::env::temp_dir().join(format!("trex-xtask-{name}-{}-{millis}", std::process::id()));
         fs::create_dir_all(&root).expect("create temp root");
         root
+    }
+
+    #[test]
+    fn clean_trex_bench_outputs_removes_stale_assembly_and_quast_dirs() {
+        let root = temp_root("clean-bench-output");
+        let out_dir = root.join("target/benchmarks/example/trex");
+        let quast_dir = root.join("target/benchmarks/example/trex-quast");
+        fs::create_dir_all(&out_dir).expect("out dir");
+        fs::create_dir_all(&quast_dir).expect("quast dir");
+        fs::write(out_dir.join("contigs.fa"), b">stale\nACGT\n").expect("stale contigs");
+        fs::write(quast_dir.join("report.tsv"), b"stale\n").expect("stale quast");
+
+        let trex = TrexBench {
+            tiers: vec![Tier::Manual],
+            args: vec![],
+            out_dir: "target/benchmarks/example/trex".to_string(),
+            reference: None,
+            confident_regions_bed: None,
+            variant_vcf: None,
+            parental_references: Vec::new(),
+        };
+        clean_trex_bench_outputs(&root, &trex).expect("clean outputs");
+
+        assert!(!out_dir.exists());
+        assert!(!quast_dir.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clean_trex_bench_outputs_rejects_unsafe_target_root() {
+        let root = temp_root("reject-target-root");
+        let trex = TrexBench {
+            tiers: vec![Tier::Manual],
+            args: vec![],
+            out_dir: "target".to_string(),
+            reference: None,
+            confident_regions_bed: None,
+            variant_vcf: None,
+            parental_references: Vec::new(),
+        };
+
+        assert!(clean_trex_bench_outputs(&root, &trex).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
