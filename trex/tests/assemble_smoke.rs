@@ -211,7 +211,10 @@ fn multi_k_ladder_selects_one_graph_and_writes_sidecar() {
         strict_checkpoints: false,
         simplify: SimplifyOverrides::default(),
         diploid: DiploidParams::default(),
-        multi_k: MultiKParams { ladder: vec![3, 4] },
+        multi_k: MultiKParams {
+            auto: false,
+            ladder: vec![3, 4],
+        },
         outputs: outputs_in(dir.path()),
     };
     let out = assemble_illumina(&params).unwrap();
@@ -240,7 +243,10 @@ fn multi_k_ladder_rejects_checkpoint_root_until_checkpoint_identity_supports_sel
         strict_checkpoints: false,
         simplify: SimplifyOverrides::default(),
         diploid: DiploidParams::default(),
-        multi_k: MultiKParams { ladder: vec![3, 4] },
+        multi_k: MultiKParams {
+            auto: false,
+            ladder: vec![3, 4],
+        },
         outputs: outputs_in(dir.path()),
     };
 

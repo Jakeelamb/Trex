@@ -12,12 +12,13 @@ pub const MULTI_K_SELECTION_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Default)]
 pub struct MultiKParams {
+    pub auto: bool,
     pub ladder: Vec<usize>,
 }
 
 impl MultiKParams {
     pub fn enabled(&self) -> bool {
-        self.ladder.iter().any(|k| *k > 0)
+        self.auto || self.ladder.iter().any(|k| *k > 0)
     }
 }
 
@@ -76,7 +77,8 @@ pub fn select_k(
     })?;
     let mut candidates = Vec::new();
     let mut best: Option<MultiKCandidateReport> = None;
-    for k in normalized_ladder(&multi_k.ladder) {
+    let ladder = resolved_ladder(multi_k, shortest);
+    for k in ladder.iter().copied() {
         let report = score_candidate(reads, k, shortest, trusted_threshold)?;
         if report.feasible {
             let replace = match &best {
@@ -92,7 +94,7 @@ pub fn select_k(
 
     let Some(best) = best else {
         return Err(IngestError::KTooLarge {
-            k: *multi_k.ladder.iter().min().unwrap_or(&requested_k),
+            k: *ladder.iter().min().unwrap_or(&requested_k),
             shortest,
         }
         .into());
@@ -105,6 +107,47 @@ pub fn select_k(
         selected_k: best.k,
         candidates,
     })
+}
+
+fn resolved_ladder(multi_k: &MultiKParams, shortest: usize) -> Vec<usize> {
+    let mut out = normalized_ladder(&multi_k.ladder);
+    if multi_k.auto {
+        out.extend(auto_ladder_for_shortest_read(shortest));
+        out.sort_unstable();
+        out.dedup();
+    }
+    out
+}
+
+pub fn auto_ladder_for_shortest_read(shortest: usize) -> Vec<usize> {
+    let max_k = largest_odd_at_most(shortest.min(127));
+    if max_k < 3 {
+        return Vec::new();
+    }
+    let candidates: &[usize] = if max_k <= 37 {
+        &[25, 29, 31, 33, 35]
+    } else if max_k <= 75 {
+        &[21, 33, 45, 55, 65, 75]
+    } else {
+        &[21, 33, 55, 77, 99, 127]
+    };
+    let mut out: Vec<usize> = candidates.iter().copied().filter(|k| *k <= max_k).collect();
+    if out.is_empty() {
+        out.push(max_k);
+    } else if !out.contains(&max_k) && max_k >= 21 {
+        out.push(max_k);
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn largest_odd_at_most(value: usize) -> usize {
+    if value % 2 == 1 {
+        value
+    } else {
+        value.saturating_sub(1)
+    }
 }
 
 fn normalized_ladder(ladder: &[usize]) -> Vec<usize> {
@@ -219,7 +262,7 @@ fn fraction(numerator: usize, denominator: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_k, MultiKParams};
+    use super::{auto_ladder_for_shortest_read, select_k, MultiKParams};
     use crate::illumina::read::Read;
 
     #[test]
@@ -242,7 +285,16 @@ mod tests {
             id: "r1".to_string(),
             sequence: b"ACGTACGT".to_vec(),
         }];
-        let report = select_k(&reads, 4, 1, &MultiKParams { ladder: vec![0] }).expect("select");
+        let report = select_k(
+            &reads,
+            4,
+            1,
+            &MultiKParams {
+                auto: false,
+                ladder: vec![0],
+            },
+        )
+        .expect("select");
 
         assert!(!report.enabled);
         assert_eq!(report.requested_k, 4);
@@ -261,6 +313,7 @@ mod tests {
             4,
             1,
             &MultiKParams {
+                auto: false,
                 ladder: vec![3, 4, 5],
             },
         )
@@ -278,7 +331,16 @@ mod tests {
             id: "r1".to_string(),
             sequence: b"ACGT".to_vec(),
         }];
-        let report = select_k(&reads, 4, 1, &MultiKParams { ladder: vec![3, 9] }).expect("select");
+        let report = select_k(
+            &reads,
+            4,
+            1,
+            &MultiKParams {
+                auto: false,
+                ladder: vec![3, 9],
+            },
+        )
+        .expect("select");
 
         assert_eq!(report.selected_k, 3);
         assert_eq!(report.candidates.len(), 2);
@@ -288,5 +350,47 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("exceeds shortest"));
+    }
+
+    #[test]
+    fn auto_ladder_for_short_short_reads_includes_short_read_candidates() {
+        assert_eq!(auto_ladder_for_shortest_read(36), vec![25, 29, 31, 33, 35]);
+    }
+
+    #[test]
+    fn auto_ladder_caps_long_reads_at_127() {
+        assert_eq!(
+            auto_ladder_for_shortest_read(151),
+            vec![21, 33, 55, 77, 99, 127]
+        );
+    }
+
+    #[test]
+    fn auto_ladder_handles_very_short_reads() {
+        assert_eq!(auto_ladder_for_shortest_read(12), vec![11]);
+    }
+
+    #[test]
+    fn auto_k_scores_derived_candidates() {
+        let reads = vec![Read {
+            id: "r1".to_string(),
+            sequence: b"ACGTACGTACGT".to_vec(),
+        }];
+        let report = select_k(
+            &reads,
+            21,
+            1,
+            &MultiKParams {
+                auto: true,
+                ladder: Vec::new(),
+            },
+        )
+        .expect("select");
+
+        assert!(report.enabled);
+        assert_eq!(report.requested_k, 21);
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.candidates[0].k, 11);
+        assert_eq!(report.selected_k, 11);
     }
 }

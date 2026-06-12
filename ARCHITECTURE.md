@@ -142,10 +142,13 @@ The public operator surface is one binary and one Illumina assemble command:
 
 ```bash
 trex illumina assemble --r1 reads.fq --kmer-size 31 --out-dir run
+trex illumina assemble --r1 reads.fq --auto-k --out-dir run
 trex illumina assemble --r1 r1.fq --r2 r2.fq --kmer-size 31 --diploid --insert-mean-bp 350 --out-dir run
 ```
 
 The optional TOML config accepts either flat assemble keys or an `[assemble]` table. CLI flags override config fields, config fields override built-in defaults, and `--no-resume` / `--no-strict-checkpoints` force those booleans off even if the config sets them.
+
+`--auto-k` derives a deterministic odd-*k* candidate ladder from the shortest retained read, scores it with the same selector used by `--kmer-ladder`, emits `multi_k.json`, and assembles only the selected graph. It does not merge candidate graphs.
 
 Built-in defaults that matter architecturally:
 

@@ -406,6 +406,58 @@ args = [
 ]
 
 [[rows]]
+id = "drosophila_illumina_pe_1m_benchmarks_comparison"
+technology = "illumina_pe"
+organism = "Drosophila melanogaster"
+license = "public_ena; public_ncbi_refseq; local_benchmarks_workspace"
+provenance = "Local /home/jake/Projects/Benchmarks Drosophila Illumina 1M-pair rung from ENA DRR001444 plus NCBI RefSeq GCF_000001215.4 Release 6 reference"
+depth_class = "drosophila_real_reads_benchmarks_repo_1m_pairs"
+ci_tier = "manual"
+product_claim = "Trex manual cross-assembler comparison uses the same Drosophila Illumina paired-end 1M-pair rung as the local Benchmarks assembler bakeoff."
+claim_level = "observed"
+reference_availability = "external_reference"
+artifact_policy = "manual_archive"
+external_data = "drosophila_illumina_pe_1m"
+fixtures = [
+  "data/benchmarks/drosophila_illumina_pe_1m/reference.release6.fa",
+  "data/benchmarks/drosophila_illumina_pe_1m/illumina_pe_r1.1m.fq",
+  "data/benchmarks/drosophila_illumina_pe_1m/illumina_pe_r2.1m.fq",
+]
+required_tools = ["cargo"]
+optional_tools = ["quast.py", "busco"]
+artifacts = [
+  "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex/contigs.fa",
+  "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex/unitigs.fa",
+  "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex/graph.gfa",
+  "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex/audit.json",
+  "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex/diploid.json",
+]
+manual_artifacts = [
+  "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex-quast/combined_reference/report.tsv",
+]
+notes = "First Trex row aimed at the local Benchmarks assembler comparison surface. It starts at the manifest-pinned 1M-pair rung before attempting the 5M, 25M, or 50M Drosophila scales already tracked for SPAdes, MEGAHIT, Velvet, and Tadpole."
+
+[rows.trex]
+tiers = ["manual"]
+out_dir = "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex"
+reference = "data/benchmarks/drosophila_illumina_pe_1m/reference.release6.fa"
+args = [
+  "illumina",
+  "assemble",
+  "--r1",
+  "data/benchmarks/drosophila_illumina_pe_1m/illumina_pe_r1.1m.fq",
+  "--r2",
+  "data/benchmarks/drosophila_illumina_pe_1m/illumina_pe_r2.1m.fq",
+  "--kmer-size",
+  "31",
+  "--trusted-threshold",
+  "2",
+  "--diploid",
+  "--out-dir",
+  "target/benchmarks/drosophila_illumina_pe_1m_benchmarks_comparison/trex",
+]
+
+[[rows]]
 id = "hg002_giab_grch38_chr20_5k_pairs"
 technology = "illumina_pe"
 organism = "Homo sapiens HG002 / NA24385"

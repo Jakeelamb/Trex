@@ -38,6 +38,7 @@ struct DiploidFilePartial {
 struct AssembleFileConfig {
     r2: Option<PathBuf>,
     k: Option<usize>,
+    auto_k: Option<bool>,
     k_ladder: Option<Vec<usize>>,
     trusted_threshold: Option<u64>,
     checkpoint_root: Option<PathBuf>,
@@ -90,6 +91,9 @@ enum IlluminaCmd {
         /// *k*-mer size (required unless set in `--config`).
         #[arg(short = 'k', long = "kmer-size")]
         k: Option<usize>,
+        /// Derive and score a deterministic k-mer ladder from observed read length.
+        #[arg(long = "auto-k", default_value_t = false)]
+        auto_k: bool,
         /// Explicit multi-k candidate ladder, for example `21,31,41`; selects one graph and writes `multi_k.json`.
         #[arg(long = "kmer-ladder", value_delimiter = ',')]
         k_ladder: Option<Vec<usize>>,
@@ -161,6 +165,7 @@ async fn main() -> std::process::ExitCode {
                 r1,
                 r2,
                 k,
+                auto_k,
                 k_ladder,
                 trusted_threshold,
                 checkpoint_root,
@@ -213,15 +218,17 @@ async fn main() -> std::process::ExitCode {
                 };
 
                 let resolved_k_ladder = k_ladder.or(file_cfg.k_ladder).unwrap_or_default();
+                let auto_k = auto_k || file_cfg.auto_k.unwrap_or(false);
                 let k = k.or(file_cfg.k).or_else(|| {
                     resolved_k_ladder
                         .iter()
                         .copied()
                         .find(|candidate| *candidate > 0)
+                        .or_else(|| auto_k.then_some(21))
                 });
                 let Some(k) = k else {
                     tracing::error!(
-                        "k-mer size missing: pass `--kmer-size` / `-k`, set `k` in config, or provide a non-empty `--kmer-ladder`"
+                        "k-mer size missing: pass `--kmer-size` / `-k`, set `k` in config, provide a non-empty `--kmer-ladder`, or pass `--auto-k`"
                     );
                     return std::process::ExitCode::from(1);
                 };
@@ -305,6 +312,7 @@ async fn main() -> std::process::ExitCode {
                     simplify,
                     diploid: diploid_params,
                     multi_k: MultiKParams {
+                        auto: auto_k,
                         ladder: resolved_k_ladder,
                     },
                     outputs: AssembleOutputs {

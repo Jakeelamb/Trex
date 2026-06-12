@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 type DynResult<T> = Result<T, Box<dyn Error>>;
@@ -156,6 +157,7 @@ struct DataSet {
     provenance_url: String,
     ploidy_provenance_url: Option<String>,
     notes: String,
+    #[serde(default)]
     files: Vec<DataFile>,
     #[serde(default)]
     alignments: Vec<DataAlignmentFile>,
@@ -168,6 +170,8 @@ struct DataSet {
     #[serde(default)]
     interval_pairs: Vec<IntervalPairDataFile>,
     #[serde(default)]
+    local_files: Vec<LocalDataFile>,
+    #[serde(default)]
     prepared: Vec<PreparedDataFile>,
 }
 
@@ -177,6 +181,17 @@ struct DataFile {
     url: String,
     md5: Option<String>,
     bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalDataFile {
+    role: String,
+    source_path: String,
+    path: String,
+    records: Option<usize>,
+    bases: Option<u64>,
+    sha256: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,14 +370,14 @@ struct AssemblyMetrics {
     contigs: Option<FastaStats>,
     unitigs: Option<FastaStats>,
     gfa: Option<GfaStats>,
-    evidence: Option<serde_json::Value>,
-    annotations: Option<serde_json::Value>,
-    simplification: Option<serde_json::Value>,
-    scaffolds: Option<serde_json::Value>,
-    multi_k: Option<serde_json::Value>,
-    fragmentation: Option<serde_json::Value>,
-    audit: Option<serde_json::Value>,
-    diploid: Option<serde_json::Value>,
+    evidence: Option<Value>,
+    annotations: Option<Value>,
+    simplification: Option<Value>,
+    scaffolds: Option<Value>,
+    multi_k: Option<Value>,
+    fragmentation: Option<Value>,
+    audit: Option<Value>,
+    diploid: Option<Value>,
     reference_quality: Option<ReferenceQuality>,
     parental_reference_quality: Vec<NamedReferenceQuality>,
     read_assembly_quality: Option<ReadAssemblyKmerQuality>,
@@ -803,10 +818,6 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
                 );
             }
         }
-        if roles.is_empty() {
-            return Err(format!("{}: at least one source file is required", dataset.id).into());
-        }
-
         let mut alignment_roles = BTreeSet::new();
         for alignment in &dataset.alignments {
             if !alignment_roles.insert(alignment.role.clone()) {
@@ -1107,6 +1118,82 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
                     }
                 }
             }
+        }
+
+        let mut local_roles = BTreeSet::new();
+        for local in &dataset.local_files {
+            if !local_roles.insert(local.role.clone()) {
+                return Err(
+                    format!("{}: duplicate local file role {}", dataset.id, local.role).into(),
+                );
+            }
+            if local.source_path.trim().is_empty() {
+                return Err(format!(
+                    "{}: local file {} source_path must not be empty",
+                    dataset.id, local.role
+                )
+                .into());
+            }
+            require_rel_path(root, &dataset.id, "local_file.path", &local.path, false)?;
+            if !local.path.starts_with("data/") {
+                return Err(format!(
+                    "{}: local file data must live under data/: {}",
+                    dataset.id, local.path
+                )
+                .into());
+            }
+            if local.records == Some(0) {
+                return Err(format!(
+                    "{}: local file {} records must be non-zero when present",
+                    dataset.id, local.role
+                )
+                .into());
+            }
+            if local.bases == Some(0) {
+                return Err(format!(
+                    "{}: local file {} bases must be non-zero when present",
+                    dataset.id, local.role
+                )
+                .into());
+            }
+            if let Some(expected) = local.sha256.as_deref() {
+                if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "{}: invalid sha256 for local file {}",
+                        dataset.id, local.role
+                    )
+                    .into());
+                }
+                let path = root.join(&local.path);
+                if path.exists() {
+                    let got = sha256_file(&path)?;
+                    if got != expected {
+                        return Err(format!(
+                            "{}: local file {} digest mismatch: got {}, expected {}",
+                            dataset.id, local.role, got, expected
+                        )
+                        .into());
+                    }
+                }
+            }
+            if let Some(notes) = local.notes.as_deref() {
+                if notes.trim().is_empty() {
+                    return Err(format!(
+                        "{}: local file {} notes must not be empty when present",
+                        dataset.id, local.role
+                    )
+                    .into());
+                }
+            }
+        }
+
+        if roles.is_empty()
+            && alignment_roles.is_empty()
+            && reference_roles.is_empty()
+            && truth_roles.is_empty()
+            && local_roles.is_empty()
+        {
+            return Err(format!("{}: at least one source file is required", dataset.id).into());
         }
 
         for prepared in &dataset.prepared {
@@ -1914,14 +2001,14 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let contigs = fasta_stats_optional(&out_dir.join("contigs.fa"))?;
     let unitigs = fasta_stats_optional(&out_dir.join("unitigs.fa"))?;
     let gfa = gfa_stats_optional(&out_dir.join("graph.gfa"))?;
-    let evidence = evidence_json_optional(&out_dir.join("evidence.json"))?;
-    let annotations = json_optional(&out_dir.join("annotations.json"))?;
-    let simplification = json_optional(&out_dir.join("simplification.json"))?;
-    let scaffolds = json_optional(&out_dir.join("scaffolds.json"))?;
-    let multi_k = json_optional(&out_dir.join("multi_k.json"))?;
-    let fragmentation = json_optional(&out_dir.join("fragmentation.json"))?;
-    let audit = json_optional(&out_dir.join("audit.json"))?;
-    let diploid = json_optional(&out_dir.join("diploid.json"))?;
+    let evidence = json_summary_optional(&out_dir.join("evidence.json"))?;
+    let annotations = json_summary_optional(&out_dir.join("annotations.json"))?;
+    let simplification = json_summary_optional(&out_dir.join("simplification.json"))?;
+    let scaffolds = json_summary_optional(&out_dir.join("scaffolds.json"))?;
+    let multi_k = json_summary_optional(&out_dir.join("multi_k.json"))?;
+    let fragmentation = json_summary_optional(&out_dir.join("fragmentation.json"))?;
+    let audit = json_summary_optional(&out_dir.join("audit.json"))?;
+    let diploid = json_summary_optional(&out_dir.join("diploid.json"))?;
     let reference_quality = match (trex.reference.as_deref(), kmer_size) {
         (Some(reference), Some(k)) => {
             let contigs_path = out_dir.join("contigs.fa");
@@ -1980,16 +2067,66 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     })
 }
 
-fn evidence_json_optional(path: &Path) -> DynResult<Option<serde_json::Value>> {
-    json_optional(path)
-}
-
-fn json_optional(path: &Path) -> DynResult<Option<serde_json::Value>> {
+fn json_summary_optional(path: &Path) -> DynResult<Option<Value>> {
     if !path.exists() {
         return Ok(None);
     }
     let bytes = fs::read(path)?;
-    Ok(Some(serde_json::from_slice(&bytes)?))
+    let value: Value = serde_json::from_slice(&bytes)?;
+    Ok(Some(summarize_json_sidecar(value)))
+}
+
+fn summarize_json_sidecar(value: Value) -> Value {
+    let Value::Object(object) = value else {
+        return value;
+    };
+    let mut summary = Map::new();
+    for key in ["schema_version", "summary"] {
+        if let Some(value) = object.get(key) {
+            summary.insert(key.to_string(), compact_json_value(value));
+        }
+    }
+    for (key, value) in object {
+        if summary.contains_key(&key) {
+            continue;
+        }
+        match value {
+            Value::Array(values) => {
+                summary.insert(format!("{key}_count"), Value::from(values.len()));
+            }
+            Value::Object(values) => {
+                summary.insert(format!("{key}_count"), Value::from(values.len()));
+            }
+            value => {
+                summary.insert(key, value);
+            }
+        }
+    }
+    Value::Object(summary)
+}
+
+fn compact_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::from(values.len()),
+        Value::Object(values) => {
+            let mut compacted = Map::new();
+            for (key, value) in values {
+                match value {
+                    Value::Array(values) => {
+                        compacted.insert(format!("{key}_count"), Value::from(values.len()));
+                    }
+                    Value::Object(_) => {
+                        compacted.insert(key.clone(), compact_json_value(value));
+                    }
+                    value => {
+                        compacted.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Value::Object(compacted)
+        }
+        value => value.clone(),
+    }
 }
 
 fn run_optional_quast(root: &Path, trex: &TrexBench) -> DynResult<Option<ScriptReport>> {
@@ -2563,6 +2700,9 @@ fn fetch_data(root: &Path, dataset_filter: Option<&str>) -> DynResult<()> {
 }
 
 fn fetch_dataset(root: &Path, dataset: &DataSet) -> DynResult<()> {
+    for local in &dataset.local_files {
+        link_local_data_file(root, dataset, local)?;
+    }
     for reference in &dataset.references {
         fetch_reference(root, dataset, reference)?;
     }
@@ -2649,6 +2789,86 @@ fn fetch_dataset(root: &Path, dataset: &DataSet) -> DynResult<()> {
         }
     }
     Ok(())
+}
+
+fn link_local_data_file(root: &Path, dataset: &DataSet, local: &LocalDataFile) -> DynResult<()> {
+    let source_path = Path::new(&local.source_path);
+    if !source_path.exists() {
+        return Err(format!(
+            "xtask fetch-data: {} local file {} source missing: {}",
+            dataset.id, local.role, local.source_path
+        )
+        .into());
+    }
+
+    let out_path = root.join(&local.path);
+    let expected = local.sha256.as_deref();
+    if out_path.exists() {
+        if let Some(records) = local.records {
+            validate_fastq_record_count(&out_path, records)?;
+        }
+        let got = sha256_file(&out_path)?;
+        if expected.map(|sha| sha == got).unwrap_or(false) {
+            println!(
+                "xtask fetch-data: {} local file {} already linked ({got})",
+                dataset.id, local.role
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "xtask fetch-data: {} local file {} exists with unexpected digest: got {}, expected {}",
+            dataset.id,
+            local.role,
+            got,
+            expected.unwrap_or("<unrecorded>")
+        )
+        .into());
+    }
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    symlink_or_copy_file(source_path, &out_path)?;
+    if let Some(records) = local.records {
+        validate_fastq_record_count(&out_path, records)?;
+    }
+    let got = sha256_file(&out_path)?;
+    match expected {
+        Some(expected) if expected == got => {
+            println!(
+                "xtask fetch-data: {} local file {} linked ({got})",
+                dataset.id, local.role
+            );
+        }
+        Some(expected) => {
+            let _ = fs::remove_file(&out_path);
+            return Err(format!(
+                "xtask fetch-data: {} local file {} digest mismatch: got {}, expected {}",
+                dataset.id, local.role, got, expected
+            )
+            .into());
+        }
+        None => {
+            println!(
+                "xtask fetch-data: {} local file {} linked sha256={got}",
+                dataset.id, local.role
+            );
+        }
+    }
+    Ok(())
+}
+
+fn symlink_or_copy_file(source: &Path, target: &Path) -> DynResult<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, target)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::copy(source, target)?;
+        Ok(())
+    }
 }
 
 fn fetch_reference_slice(

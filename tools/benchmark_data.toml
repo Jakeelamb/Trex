@@ -259,3 +259,47 @@ r2_path = "data/benchmarks/hg002_giab_grch38_chr20/r2.chr20_10000000_10010000.10
 r1_sha256 = "8c9760636fe69ad69e6b50092144ed8ccbf90570644f0ada5ac92815596bf0b6"
 r2_sha256 = "882e4c64e16a61e24c83f919ac510cafc0e217dfae5e18808d0d240793c41d1a"
 notes = "First 1,000 paired reads from the indexed GIAB/NHGRI GRCh38 chr20 Novoalign BAM over chr20:10000000-10010000 after singleton/secondary/supplementary filtering."
+
+[[datasets]]
+id = "drosophila_illumina_pe_1m"
+scientific_name = "Drosophila melanogaster"
+source = "local Benchmarks repo + ENA + NCBI RefSeq"
+study_accession = "PRJDA72881"
+run_accession = "DRR001444"
+sample_accession = "SAMD00000814"
+experiment_accession = "DRX000774"
+library_strategy = "WGS"
+library_layout = "PAIRED"
+instrument_model = "Illumina Genome Analyzer II"
+read_count = 2000000
+base_count = 72000000
+ploidy = "2"
+license = "public_ena; public_ncbi_refseq; local_benchmarks_workspace"
+provenance_url = "https://www.ebi.ac.uk/ena/browser/view/DRR001444"
+notes = "Drosophila Illumina paired-end 1M-pair rung shared with /home/jake/Projects/Benchmarks for cross-assembler performance comparison. `xtask fetch-data` links the local Benchmarks files into ignored Trex data paths instead of copying or downloading them."
+
+[[datasets.local_files]]
+role = "r1_1m"
+source_path = "/home/jake/Projects/Benchmarks/datasets/drosophila_melanogaster/illumina_pe_r1.1m.fq"
+path = "data/benchmarks/drosophila_illumina_pe_1m/illumina_pe_r1.1m.fq"
+records = 1000000
+bases = 36000000
+sha256 = "0daad6c8cc22ad9f54bcc533617cdc07aa5dacd7c8898bb195b4dbdac786d67c"
+notes = "Benchmarks manifest drosophila_prepared.tsv row illumina_pe_r1_1m."
+
+[[datasets.local_files]]
+role = "r2_1m"
+source_path = "/home/jake/Projects/Benchmarks/datasets/drosophila_melanogaster/illumina_pe_r2.1m.fq"
+path = "data/benchmarks/drosophila_illumina_pe_1m/illumina_pe_r2.1m.fq"
+records = 1000000
+bases = 36000000
+sha256 = "9b44693fa26b620bcbb0ca84216f3d53c5b245e4b04cda09277cb1c6d448b3c6"
+notes = "Benchmarks manifest drosophila_prepared.tsv row illumina_pe_r2_1m."
+
+[[datasets.local_files]]
+role = "release6_reference"
+source_path = "/home/jake/Projects/Benchmarks/datasets/drosophila_melanogaster/reference.release6.fa"
+path = "data/benchmarks/drosophila_illumina_pe_1m/reference.release6.fa"
+bases = 143726002
+sha256 = "4e14dbd8ea213a19ebf27057ab62a57ca83951e79ae0c2501ae4c460b7c3d415"
+notes = "Benchmarks manifest drosophila_prepared.tsv row reference_release6; NCBI RefSeq GCF_000001215.4 Release 6 plus ISO1 MT."
