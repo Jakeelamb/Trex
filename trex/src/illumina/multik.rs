@@ -17,7 +17,7 @@ pub struct MultiKParams {
 
 impl MultiKParams {
     pub fn enabled(&self) -> bool {
-        !self.ladder.is_empty()
+        self.ladder.iter().any(|k| *k > 0)
     }
 }
 
@@ -229,6 +229,20 @@ mod tests {
             sequence: b"ACGTACGT".to_vec(),
         }];
         let report = select_k(&reads, 4, 1, &MultiKParams::default()).expect("select");
+
+        assert!(!report.enabled);
+        assert_eq!(report.requested_k, 4);
+        assert_eq!(report.selected_k, 4);
+        assert!(report.candidates.is_empty());
+    }
+
+    #[test]
+    fn zero_only_ladder_keeps_requested_single_k() {
+        let reads = vec![Read {
+            id: "r1".to_string(),
+            sequence: b"ACGTACGT".to_vec(),
+        }];
+        let report = select_k(&reads, 4, 1, &MultiKParams { ladder: vec![0] }).expect("select");
 
         assert!(!report.enabled);
         assert_eq!(report.requested_k, 4);
