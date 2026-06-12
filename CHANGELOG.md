@@ -35,3 +35,4 @@
 - Benchmark diploid metrics: direct Trex benchmark rows can declare parental references and emit per-parent reference k-mer quality; the synthetic Phase-2 row now produces this JSON on nightly/manual tiers.
 - Development protocol: worker agents now have explicit read-only and implementation modes; implementation workers may edit only assigned files in orchestrator-created temporary worktrees, while `git`, `cargo`, formatting, and gates remain orchestrator-only.
 - Graph-walk scoring now carries greedy candidate path scores during construction instead of recomputing edge-weight sums during candidate selection, preserving tie-break behavior while reducing repeated adjacency lookups.
+- Gzip ingest now uses multi-member decoding, so concatenated `.gz` FASTQ/FASTA streams are read as one logical input instead of stopping after the first gzip member.
