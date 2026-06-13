@@ -4,7 +4,6 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -12,6 +11,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 type DynResult<T> = Result<T, Box<dyn Error>>;
+
+mod bench_harness;
+use bench_harness::BenchmarkHarness;
 
 #[derive(Parser)]
 #[command(name = "xtask", version, about = "Trex repository automation")]
@@ -729,9 +731,31 @@ fn digest_key_for_fixture(path: &str) -> DynResult<String> {
 }
 
 fn sha256_file(path: &Path) -> DynResult<String> {
-    let bytes = fs::read(path)?;
-    let digest = Sha256::digest(bytes);
+    use std::io::Read;
+
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
     Ok(format!("{digest:x}"))
+}
+
+const VALIDATE_DATA_INLINE_HASH_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+fn validate_data_should_hash(path: &Path) -> bool {
+    if env_truthy("TREX_XTASK_VALIDATE_DATA_FULL_HASH") {
+        return true;
+    }
+    fs::metadata(path)
+        .map(|meta| meta.len() <= VALIDATE_DATA_INLINE_HASH_MAX_BYTES)
+        .unwrap_or(true)
 }
 
 fn validate_capabilities(root: &Path) -> DynResult<()> {
@@ -935,7 +959,7 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
                     .into());
                 }
                 let path = root.join(&reference.path);
-                if path.exists() {
+                if path.exists() && validate_data_should_hash(&path) {
                     let got = sha256_file(&path)?;
                     if got != expected {
                         return Err(format!(
@@ -997,7 +1021,7 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
                     .into());
                 }
                 let path = root.join(&slice.path);
-                if path.exists() {
+                if path.exists() && validate_data_should_hash(&path) {
                     let got = sha256_file(&path)?;
                     if got != expected {
                         return Err(format!(
@@ -1199,7 +1223,7 @@ fn validate_data_catalog(root: &Path) -> DynResult<()> {
                     .into());
                 }
                 let path = root.join(&local.path);
-                if path.exists() {
+                if path.exists() && validate_data_should_hash(&path) {
                     let got = sha256_file(&path)?;
                     if got != expected {
                         return Err(format!(
@@ -1514,6 +1538,7 @@ fn validate_framework_list(
 fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> DynResult<()> {
     validate_matrix(root)?;
     let matrix = load_matrix(root)?;
+    let harness = BenchmarkHarness::new(root);
     let mut rows = Vec::new();
     let mut failed = false;
     let mut matched_filter = false;
@@ -1542,7 +1567,7 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
             .clone()
             .ok_or("validated row missing artifact_policy")?;
         let comparison_threads = row.comparison_threads;
-        let tools = tool_availability(
+        let tools = harness.tool_availability(
             row.required_tools.as_deref().unwrap_or(&[]),
             row.optional_tools.as_deref().unwrap_or(&[]),
         );
@@ -1588,19 +1613,9 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
                 }
             }
         }
-        let layer_status = row_layer_status(&tools, &script_reports, &trex_reports);
+        let layer_status = harness.row_layer_status(&tools, &script_reports, &trex_reports);
 
-        let artifacts = artifacts_for_tier(row, tier)
-            .into_iter()
-            .map(|path| {
-                let meta = fs::metadata(root.join(path)).ok();
-                ArtifactReport {
-                    path: path.to_string(),
-                    exists: meta.is_some(),
-                    bytes: meta.map(|m| m.len()),
-                }
-            })
-            .collect();
+        let artifacts = harness.artifact_reports(artifacts_for_tier(row, tier));
 
         rows.push(BenchRowReport {
             id: row_id,
@@ -1623,106 +1638,13 @@ fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> D
         }
     }
 
-    let report = BenchReport {
-        schema_version: 1,
-        tier,
-        generated_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-        rows,
-    };
-    let out_path = if out.is_absolute() {
-        out.to_path_buf()
-    } else {
-        root.join(out)
-    };
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&out_path, serde_json::to_string_pretty(&report)? + "\n")?;
+    let out_path = harness.write_report(tier, rows, out)?;
     println!("xtask bench: wrote {}", out_path.display());
 
     if failed {
         return Err("xtask bench: one or more rows failed".into());
     }
     Ok(())
-}
-
-fn tool_availability(required_tools: &[String], optional_tools: &[String]) -> ToolAvailability {
-    let (required_available, required_unavailable) = partition_tools(required_tools);
-    let (optional_available, optional_unavailable) = partition_tools(optional_tools);
-    ToolAvailability {
-        required_available,
-        required_unavailable,
-        optional_available,
-        optional_unavailable,
-    }
-}
-
-fn partition_tools(tools: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut available = Vec::new();
-    let mut unavailable = Vec::new();
-    for tool in tools {
-        if command_available(tool) {
-            available.push(tool.clone());
-        } else {
-            unavailable.push(tool.clone());
-        }
-    }
-    (available, unavailable)
-}
-
-fn command_available(name: &str) -> bool {
-    let path = Path::new(name);
-    if path.components().count() > 1 {
-        return path.exists();
-    }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
-}
-
-fn row_layer_status(
-    tools: &ToolAvailability,
-    scripts: &[ScriptReport],
-    trex_reports: &[TrexRunReport],
-) -> RowLayerStatus {
-    if let Some(tool) = tools.required_unavailable.first() {
-        return RowLayerStatus {
-            status: "failed".to_string(),
-            failed_layer: Some(format!("required_tool:{tool}")),
-        };
-    }
-    for script in scripts {
-        if !script.success {
-            return RowLayerStatus {
-                status: "failed".to_string(),
-                failed_layer: Some(format!("script:{}", script.path)),
-            };
-        }
-    }
-    for report in trex_reports {
-        if !report.success {
-            return RowLayerStatus {
-                status: "failed".to_string(),
-                failed_layer: Some("trex".to_string()),
-            };
-        }
-        if report
-            .quast
-            .as_ref()
-            .map(|quast| !quast.success)
-            .unwrap_or(false)
-        {
-            return RowLayerStatus {
-                status: "failed".to_string(),
-                failed_layer: Some("quast".to_string()),
-            };
-        }
-    }
-    RowLayerStatus {
-        status: "passed".to_string(),
-        failed_layer: None,
-    }
 }
 
 fn run_gate(root: &Path, tier: Tier) -> DynResult<()> {
@@ -4111,6 +4033,7 @@ fn parse_time_stderr(stderr: &str) -> (Option<f64>, Option<u64>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
         let millis = SystemTime::now()
@@ -4438,7 +4361,7 @@ parental_references = [
             optional_unavailable: Vec::new(),
         };
 
-        let status = row_layer_status(&tools, &[], &[]);
+        let status = BenchmarkHarness::new(Path::new(".")).row_layer_status(&tools, &[], &[]);
 
         assert_eq!(status.status, "failed");
         assert_eq!(

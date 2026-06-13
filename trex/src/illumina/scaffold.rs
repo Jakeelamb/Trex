@@ -2,14 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::illumina::fragmentation::{
-    FragmentEndpointReport, FragmentStopReason, FragmentationReport,
-};
+use crate::illumina::fragmentation::FragmentationReport;
 use crate::illumina::mate::{
     MateBridgeCandidate, MateDistanceBin, MateDistanceEvidence, MateGraphContext,
     MatePairOrientation, MateSupportHistogram,
 };
-use crate::illumina::promotion::{EndpointJoinPromotionPolicy, PromotionPolicySnapshot};
+use crate::illumina::promotion::PromotionPolicySnapshot;
+use crate::illumina::scaffold_promotion::{accepted_endpoint_join, ScaffoldPromotionEngine};
 use crate::kmer::reverse_complement;
 
 pub const SCAFFOLD_ARTIFACT_SCHEMA_VERSION: u64 = 6;
@@ -194,7 +193,8 @@ pub fn build_scaffold_artifact(
 
     let promotion_policy = PromotionPolicySnapshot::default();
     let endpoint_join_candidates =
-        ranked_endpoint_joins(candidates, fragmentation, &promotion_policy.endpoint_join);
+        ScaffoldPromotionEngine::new(candidates, fragmentation, &promotion_policy.endpoint_join)
+            .ranked_endpoint_joins();
     for candidate in candidates {
         let accepted_join = accepted_endpoint_join(&endpoint_join_candidates, candidate);
         if !candidate.existing_dbg_edge && accepted_join.is_none() {
@@ -258,123 +258,6 @@ pub fn build_scaffold_artifact(
         endpoint_join_candidates,
         paths,
     }
-}
-
-fn ranked_endpoint_joins(
-    candidates: &[MateBridgeCandidate],
-    fragmentation: &FragmentationReport,
-    policy: &EndpointJoinPromotionPolicy,
-) -> Vec<EndpointJoinCandidate> {
-    let mut endpoint_use: std::collections::BTreeMap<&str, usize> =
-        std::collections::BTreeMap::new();
-    for candidate in candidates {
-        if candidate.existing_dbg_edge {
-            continue;
-        }
-        *endpoint_use
-            .entry(candidate.from_node.as_str())
-            .or_insert(0) += 1;
-        *endpoint_use.entry(candidate.to_node.as_str()).or_insert(0) += 1;
-    }
-    let mut joins: Vec<EndpointJoinCandidate> = candidates
-        .iter()
-        .filter_map(|candidate| {
-            let from = dead_end_endpoint_for_node(fragmentation, &candidate.from_node)?;
-            let to = dead_end_endpoint_for_node(fragmentation, &candidate.to_node)?;
-            if from.contig == to.contig {
-                return None;
-            }
-            let conflict_cluster_size = if candidate.existing_dbg_edge {
-                0
-            } else {
-                endpoint_use
-                    .get(candidate.from_node.as_str())
-                    .copied()
-                    .unwrap_or(0)
-                    .max(
-                        endpoint_use
-                            .get(candidate.to_node.as_str())
-                            .copied()
-                            .unwrap_or(0),
-                    )
-            };
-            let decision = policy.evaluate(candidate, conflict_cluster_size);
-            let accepted = decision.accepted;
-            let promotion_stage = decision.target_stage.as_str().to_string();
-            let rejection_reason = decision.rejection_reason.map(str::to_string);
-            Some(EndpointJoinCandidate {
-                id: String::new(),
-                constraint_id: candidate.constraint_id.clone(),
-                from_contig: from.contig.clone(),
-                from_side: from.side.clone(),
-                from_node: candidate.from_node.clone(),
-                to_contig: to.contig.clone(),
-                to_side: to.side.clone(),
-                to_node: candidate.to_node.clone(),
-                from_context: candidate.from_context.clone(),
-                to_context: candidate.to_context.clone(),
-                orientation: candidate.orientation,
-                distance: candidate.distance.clone(),
-                distance_bin: candidate.distance_bin.clone(),
-                support_pairs: candidate.support_pairs,
-                conflict_pairs: candidate.conflict_pairs,
-                support_histogram: candidate.support_histogram.clone(),
-                conflict_cluster_size,
-                score: candidate.score,
-                existing_dbg_edge: candidate.existing_dbg_edge,
-                blockers: candidate.blockers.clone(),
-                promotion_stage,
-                accepted,
-                rejection_reason,
-                source: if candidate.existing_dbg_edge {
-                    "mate_bridge_existing_edge"
-                } else if accepted {
-                    "mate_pair_endpoint_join_promoted_sidecar"
-                } else {
-                    "mate_pair_endpoint_join_rejected"
-                }
-                .to_string(),
-            })
-        })
-        .collect();
-    joins.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| b.support_pairs.cmp(&a.support_pairs))
-            .then_with(|| a.from_contig.cmp(&b.from_contig))
-            .then_with(|| a.from_side.cmp(&b.from_side))
-            .then_with(|| a.to_contig.cmp(&b.to_contig))
-            .then_with(|| a.to_side.cmp(&b.to_side))
-            .then_with(|| a.from_node.cmp(&b.from_node))
-            .then_with(|| a.to_node.cmp(&b.to_node))
-    });
-    for (idx, join) in joins.iter_mut().enumerate() {
-        join.id = format!("ejc{:06}", idx + 1);
-    }
-    joins
-}
-
-fn accepted_endpoint_join<'a>(
-    joins: &'a [EndpointJoinCandidate],
-    candidate: &MateBridgeCandidate,
-) -> Option<&'a EndpointJoinCandidate> {
-    joins.iter().find(|join| {
-        join.accepted
-            && !join.existing_dbg_edge
-            && join.from_node == candidate.from_node
-            && join.to_node == candidate.to_node
-            && join.orientation == candidate.orientation
-    })
-}
-
-fn dead_end_endpoint_for_node<'a>(
-    fragmentation: &'a FragmentationReport,
-    node: &str,
-) -> Option<&'a FragmentEndpointReport> {
-    fragmentation.endpoints.iter().find(|endpoint| {
-        endpoint.node.as_deref() == Some(node)
-            && endpoint.reason == FragmentStopReason::GraphDeadEnd
-    })
 }
 
 fn candidate_unitig_tail_head(

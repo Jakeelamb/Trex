@@ -44,6 +44,7 @@ papers = [
 current_files = [
   "trex/src/illumina/multik.rs",
   "trex/src/illumina/pipeline.rs",
+  "trex/src/illumina/stage.rs",
   "xtask/src/main.rs",
 ]
 promotion_stages = [
@@ -126,6 +127,7 @@ current_files = [
   "trex/src/evidence.rs",
   "trex/src/illumina/mate.rs",
   "trex/src/illumina/scaffold.rs",
+  "trex/src/illumina/scaffold_promotion.rs",
 ]
 promotion_stages = [
   "report_only_candidate",
@@ -154,6 +156,7 @@ current_files = [
   "trex/src/illumina/promotion.rs",
   "docs/ILLUMINA_ASSEMBLER_BLUEPRINT.md",
   "trex/src/illumina/scaffold.rs",
+  "trex/src/illumina/scaffold_promotion.rs",
   "trex/src/dbg/export.rs",
 ]
 promotion_stages = [
@@ -186,7 +189,9 @@ papers = [
 current_files = [
   "trex/src/dbg/export.rs",
   "trex/src/dbg/walk.rs",
+  "trex/src/illumina/output.rs",
   "trex/src/illumina/scaffold.rs",
+  "trex/src/illumina/scaffold_promotion.rs",
 ]
 promotion_stages = [
   "scaffold_artifact",
@@ -268,6 +273,7 @@ papers = [
   "literature/papers/2023-li-durbin-t2t-era.pdf",
 ]
 current_files = [
+  "xtask/src/bench_harness.rs",
   "xtask/src/main.rs",
   "scripts/reference_quast.sh",
   "tools/benchmark_matrix.toml",

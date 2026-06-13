@@ -10,6 +10,7 @@ pub mod fragmentation;
 pub mod io;
 pub mod mate;
 pub mod multik;
+pub mod output;
 pub mod paired;
 pub mod phase2_primary;
 pub mod pipeline;
@@ -17,6 +18,8 @@ pub mod preprocess;
 pub mod promotion;
 pub mod read;
 pub mod scaffold;
+pub mod scaffold_promotion;
+pub mod stage;
 pub mod trust;
 
 pub use checkpoint::{CheckpointRoot, GraphCheckpointIdentity};
