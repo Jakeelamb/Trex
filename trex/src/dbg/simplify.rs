@@ -54,7 +54,7 @@ impl Default for SimplifyDecisionLog {
 }
 
 /// Decision counters from automatic graph simplification.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SimplifyStats {
     pub tips_removed: usize,
     pub diamond_bubbles_resolved: usize,

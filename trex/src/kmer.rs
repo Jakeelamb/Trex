@@ -21,8 +21,8 @@ pub fn dna_byte_rank(b: u8) -> Option<u8> {
 /// Compare two DNA strings using **Phase-1 canonical alphabet** order.
 pub fn cmp_dna(a: &[u8], b: &[u8]) -> Ordering {
     for (&x, &y) in a.iter().zip(b.iter()) {
-        let ox = dna_byte_rank(x).expect("cmp_dna: non-ACGT");
-        let oy = dna_byte_rank(y).expect("cmp_dna: non-ACGT");
+        let ox = total_dna_byte_rank(x);
+        let oy = total_dna_byte_rank(y);
         match ox.cmp(&oy) {
             Ordering::Equal => {}
             o => return o,
@@ -31,7 +31,30 @@ pub fn cmp_dna(a: &[u8], b: &[u8]) -> Ordering {
     a.len().cmp(&b.len())
 }
 
-/// Reverse complement in **IUPAC-free** counted alphabet (input must be ACGT upper).
+#[inline]
+fn total_dna_byte_rank(b: u8) -> u16 {
+    dna_byte_rank(b).map(u16::from).unwrap_or(4 + u16::from(b))
+}
+
+/// Fallible reverse complement in **IUPAC-free** counted alphabet.
+pub fn try_reverse_complement(seq: &[u8]) -> Result<Vec<u8>, KmerError> {
+    let mut out: Vec<u8> = Vec::with_capacity(seq.len());
+    for (pos, &b) in seq.iter().enumerate().rev() {
+        out.push(match b {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'T' => b'A',
+            _ => return Err(KmerError::NonAcgtByte { pos, byte: b }),
+        });
+    }
+    Ok(out)
+}
+
+/// Reverse complement in **IUPAC-free** counted alphabet.
+///
+/// Non-ACGT bytes are emitted as `N`; use [`try_reverse_complement`] when invalid bases should be
+/// rejected.
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(seq.len());
     for &b in seq.iter().rev() {
@@ -40,7 +63,7 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
             b'C' => b'G',
             b'G' => b'C',
             b'T' => b'A',
-            _ => panic!("reverse_complement: non-ACGT byte {b}"),
+            _ => b'N',
         });
     }
     out
@@ -199,6 +222,114 @@ pub fn acgt_windows(seq: &[u8], k: usize) -> impl Iterator<Item = &[u8]> {
     })
 }
 
+pub fn packed_kmer_supported(k: usize) -> bool {
+    (1..=32).contains(&k)
+}
+
+pub fn canonical_packed_kmer(window: &[u8], k: usize) -> Option<u64> {
+    if window.len() != k || !packed_kmer_supported(k) {
+        return None;
+    }
+
+    let mut forward = 0u64;
+    for base in window {
+        forward = (forward << 2) | dna_byte_rank(*base)? as u64;
+    }
+
+    let mut reverse = 0u64;
+    for base in window.iter().rev() {
+        reverse = (reverse << 2) | (dna_byte_rank(*base)? as u64 ^ 0b11);
+    }
+
+    Some(forward.min(reverse))
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PackedCanonicalKmerSet {
+    inner: HashSet<u64>,
+}
+
+impl PackedCanonicalKmerSet {
+    pub fn from_sequences(seqs: &[Vec<u8>], k: usize) -> Option<Self> {
+        if !packed_kmer_supported(k) {
+            return None;
+        }
+        let mut set = Self {
+            inner: HashSet::new(),
+        };
+        for seq in seqs {
+            for window in acgt_windows(seq, k) {
+                if let Some(kmer) = canonical_packed_kmer(window, k) {
+                    set.inner.insert(kmer);
+                }
+            }
+        }
+        Some(set)
+    }
+
+    pub fn contains_window(&self, window: &[u8], k: usize) -> bool {
+        canonical_packed_kmer(window, k)
+            .map(|kmer| self.inner.contains(&kmer))
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PackedCanonicalKmerCounts {
+    inner: HashMap<u64, u64>,
+}
+
+impl PackedCanonicalKmerCounts {
+    pub fn from_sequences(seqs: &[Vec<u8>], k: usize) -> Option<Self> {
+        if !packed_kmer_supported(k) {
+            return None;
+        }
+        let mut counts = Self {
+            inner: HashMap::new(),
+        };
+        for seq in seqs {
+            for window in acgt_windows(seq, k) {
+                if let Some(kmer) = canonical_packed_kmer(window, k) {
+                    *counts.inner.entry(kmer).or_insert(0) += 1;
+                }
+            }
+        }
+        Some(counts)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = u64> + '_ {
+        self.inner.values().copied()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.inner.iter().map(|(kmer, count)| (*kmer, *count))
+    }
+
+    pub fn contains_key(&self, key: u64) -> bool {
+        self.inner.contains_key(&key)
+    }
+
+    pub fn get_key(&self, key: u64) -> Option<u64> {
+        self.inner.get(&key).copied()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.inner.keys().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn total(&self) -> u64 {
+        self.inner.values().sum()
+    }
+}
+
 /// Sort (non-stable) then merge equal adjacent keys into counts.
 pub fn sort_and_merge_counts(mut kmers: Vec<Vec<u8>>) -> Vec<(Vec<u8>, u64)> {
     #[cfg(feature = "parallel-kmer-sort")]
@@ -276,5 +407,18 @@ mod tests {
         let set = CanonicalKmerSet::from_sequences(&[b"ACCGTTAA".to_vec()], 4);
         assert!(set.contains_window(b"AACG"));
         assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn public_reverse_complement_does_not_panic_on_non_acgt() {
+        assert_eq!(reverse_complement(b"ACNX"), b"NNGT");
+        let err = try_reverse_complement(b"ACNX").unwrap_err();
+        assert!(matches!(err, KmerError::NonAcgtByte { pos: 3, byte: b'X' }));
+    }
+
+    #[test]
+    fn cmp_dna_has_total_order_for_non_acgt_bytes() {
+        assert_eq!(cmp_dna(b"ACG", b"ACN"), Ordering::Less);
+        assert_eq!(cmp_dna(b"ACN", b"ACX"), Ordering::Less);
     }
 }

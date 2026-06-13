@@ -1,8 +1,10 @@
 //! Named stage runner for the Illumina assembler pipeline.
 
+use std::cell::RefCell;
 use std::time::Instant;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssemblyStage {
     LoadReads,
     SelectK,
@@ -48,11 +50,38 @@ impl AssemblyStage {
 }
 
 #[derive(Debug, Default)]
-pub struct AssemblyStageRunner;
+pub struct AssemblyStageRunner {
+    reports: RefCell<Vec<AssemblyStageReport>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssemblyStageOutcome {
+    Complete,
+    Failed,
+}
+
+impl AssemblyStageOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssemblyStageReport {
+    pub stage: AssemblyStage,
+    pub outcome: AssemblyStageOutcome,
+    pub elapsed_ms: u128,
+}
 
 impl AssemblyStageRunner {
     pub fn new() -> Self {
-        Self
+        Self {
+            reports: RefCell::new(Vec::new()),
+        }
     }
 
     pub fn run<T, E>(
@@ -62,27 +91,48 @@ impl AssemblyStageRunner {
     ) -> Result<T, E> {
         let start = Instant::now();
         let result = f();
-        if result.is_ok() {
-            tracing::info!(
-                stage = stage.as_str(),
-                elapsed_ms = start.elapsed().as_millis(),
-                "illumina pipeline stage complete"
-            );
-        }
+        let elapsed_ms = start.elapsed().as_millis();
+        let outcome = if result.is_ok() {
+            AssemblyStageOutcome::Complete
+        } else {
+            AssemblyStageOutcome::Failed
+        };
+        self.record(stage, outcome, elapsed_ms);
+        tracing::info!(
+            stage = stage.as_str(),
+            outcome = outcome.as_str(),
+            elapsed_ms,
+            "illumina pipeline stage finished"
+        );
         result
     }
 
     pub fn observe(&self, stage: AssemblyStage, f: impl FnOnce()) {
         let start = Instant::now();
         f();
+        let elapsed_ms = start.elapsed().as_millis();
+        self.record(stage, AssemblyStageOutcome::Complete, elapsed_ms);
         tracing::info!(
             stage = stage.as_str(),
-            elapsed_ms = start.elapsed().as_millis(),
-            "illumina pipeline stage complete"
+            outcome = AssemblyStageOutcome::Complete.as_str(),
+            elapsed_ms,
+            "illumina pipeline stage finished"
         );
     }
 
     pub fn log_stage(&self, stage: AssemblyStage, elapsed_ms: u128, message: &'static str) {
         tracing::info!(stage = stage.as_str(), elapsed_ms, message);
+    }
+
+    pub fn reports(&self) -> Vec<AssemblyStageReport> {
+        self.reports.borrow().clone()
+    }
+
+    fn record(&self, stage: AssemblyStage, outcome: AssemblyStageOutcome, elapsed_ms: u128) {
+        self.reports.borrow_mut().push(AssemblyStageReport {
+            stage,
+            outcome,
+            elapsed_ms,
+        });
     }
 }

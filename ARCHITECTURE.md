@@ -35,7 +35,7 @@ flowchart LR
 
 `trex::illumina::pipeline::assemble_illumina` is the single end-to-end library entrypoint for the current assembler. It is synchronous and takes an `AssembleParams` value assembled by `trex-cli`.
 
-1. **Read ingest**: `load_reads` reads R1 and optional R2 with `read_maybe_gzip`, dispatches by suffix to FASTQ or FASTA parsing, then applies preprocess normalization. Paired-end input remains two explicit files; R1 and R2 are concatenated only after `validate_pair_parity` proves count and header identity.
+1. **Read ingest**: `load_reads` streams R1 and optional R2 through gzip/plain FASTQ or FASTA readers, then applies preprocess normalization. Paired-end input remains two explicit files; R1 and R2 are concatenated only after `validate_pair_parity` proves count and header identity.
 2. **Feasibility gate**: after preprocess, the shortest retained read must be at least `k`. An empty read set or impossible `k` returns a typed ingest error before enumeration.
 3. **Counts**: `enumerate_sorted_counts` emits the sorted canonical *k*-mer count table. `apply_trusted_threshold` applies the single global `T`; no Phase-2 selector changes this table or the trusted vertex set.
 4. **DBG construction**: `build_dbg` consumes reads, `k`, and trusted *k*-mers to build the Phase-1 de Bruijn graph. Read-derived forward representatives are captured separately for later sequence stitching.
@@ -142,6 +142,8 @@ Graph checkpoints are stricter. In addition to `k`, `GraphCheckpointIdentity` mu
 - `phase2_mate_bridge_v1`
 
 A mismatch returns `None` to the pipeline loader, which rebuilds the graph from reads and trusted counts. Rewriting the graph checkpoint removes stale export checkpoints because unitig and contig sequences are downstream of graph topology and edge weights.
+
+Graph checkpoints also carry `graph/stage_artifacts.json` for simplification decisions, simplification counters, and optional mate-bridge stats. Resume accepts a graph checkpoint only when these artifacts are present for the selected *k*; otherwise Trex rebuilds the graph to avoid emitting default or stale sidecars.
 
 Export checkpoints store stitched unitigs and contigs as ASCII A/C/G/T. They are reloadable by `k`, but path metadata is recomputed from the graph on resume for GFA export.
 

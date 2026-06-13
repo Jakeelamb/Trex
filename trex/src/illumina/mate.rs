@@ -200,7 +200,7 @@ impl MateBridgeCandidate {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MateBridgeStats {
     pub pairs_seen: usize,
     pub pairs_with_endpoint_kmers: usize,

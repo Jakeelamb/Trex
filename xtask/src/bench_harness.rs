@@ -3,9 +3,126 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
+    artifacts_for_tier, load_matrix, run_script, run_trex_bench, scripts_for_tier, validate_matrix,
     ArtifactReport, BenchReport, BenchRowReport, DynResult, RowLayerStatus, ScriptReport, Tier,
     ToolAvailability, TrexRunReport,
 };
+
+pub(crate) fn run_bench(
+    root: &Path,
+    tier: Tier,
+    row_filter: Option<&str>,
+    out: &Path,
+) -> DynResult<()> {
+    validate_matrix(root)?;
+    let matrix = load_matrix(root)?;
+    let harness = BenchmarkHarness::new(root);
+    let mut rows = Vec::new();
+    let mut failed = false;
+    let mut matched_filter = false;
+
+    for row in &matrix.rows {
+        let row_id = row.id.clone().ok_or("validated row missing id")?;
+        if row_filter.map(|filter| filter != row_id).unwrap_or(false) {
+            continue;
+        }
+        matched_filter = true;
+        let ci_tier = row.ci_tier.ok_or("validated row missing ci_tier")?;
+        let product_claim = row
+            .product_claim
+            .clone()
+            .ok_or("validated row missing product_claim")?;
+        let claim_level = row
+            .claim_level
+            .clone()
+            .ok_or("validated row missing claim_level")?;
+        let reference_availability = row
+            .reference_availability
+            .clone()
+            .ok_or("validated row missing reference_availability")?;
+        let artifact_policy = row
+            .artifact_policy
+            .clone()
+            .ok_or("validated row missing artifact_policy")?;
+        let comparison_threads = row.comparison_threads;
+        let tools = harness.tool_availability(
+            row.required_tools.as_deref().unwrap_or(&[]),
+            row.optional_tools.as_deref().unwrap_or(&[]),
+        );
+        let missing_required_tools = !tools.required_unavailable.is_empty();
+        if missing_required_tools {
+            failed = true;
+        }
+        let scripts = scripts_for_tier(row, tier);
+        let should_run_trex = row
+            .trex
+            .as_ref()
+            .map(|trex| trex.tiers.contains(&tier))
+            .unwrap_or(false);
+        if scripts.is_empty() && !should_run_trex {
+            continue;
+        }
+
+        let mut script_reports = Vec::new();
+        if !missing_required_tools {
+            for script in scripts {
+                let report = run_script(root, script)?;
+                if !report.success {
+                    failed = true;
+                }
+                script_reports.push(report);
+            }
+        }
+
+        let mut trex_reports = Vec::new();
+        if !missing_required_tools {
+            if let Some(trex) = row.trex.as_ref() {
+                if should_run_trex {
+                    let report = run_trex_bench(root, trex)?;
+                    let quast_failed = report
+                        .quast
+                        .as_ref()
+                        .map(|quast| !quast.success)
+                        .unwrap_or(false);
+                    if !report.success || quast_failed {
+                        failed = true;
+                    }
+                    trex_reports.push(report);
+                }
+            }
+        }
+        let layer_status = harness.row_layer_status(&tools, &script_reports, &trex_reports);
+        let artifacts = harness.artifact_reports(artifacts_for_tier(row, tier));
+
+        rows.push(BenchRowReport {
+            id: row_id,
+            ci_tier,
+            product_claim,
+            claim_level,
+            reference_availability,
+            artifact_policy,
+            comparison_threads,
+            tools,
+            layer_status,
+            scripts: script_reports,
+            trex_runs: trex_reports,
+            artifacts,
+        });
+    }
+    if let Some(filter) = row_filter {
+        if !matched_filter {
+            return Err(format!("xtask bench: row {filter:?} not found").into());
+        }
+    }
+
+    let out_path = harness.write_report(tier, rows, out)?;
+    println!("xtask bench: wrote {}", out_path.display());
+
+    if failed {
+        return Err("xtask bench: one or more rows failed".into());
+    }
+    Ok(())
+}
 
 pub(crate) struct BenchmarkHarness<'a> {
     root: &'a Path,

@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::dbg::graph::DbgGraph;
+use crate::dbg::{DbgGraph, SimplifyDecisionLog, SimplifyStats};
 use crate::error::CheckpointError;
+use crate::illumina::mate;
 use crate::illumina::read::Read;
 use crate::kmer::cmp_dna;
 
@@ -76,6 +77,10 @@ impl CheckpointRoot {
         self.graph_dir().join("manifest.json")
     }
 
+    pub fn graph_stage_artifacts_json(&self) -> PathBuf {
+        self.graph_dir().join("stage_artifacts.json")
+    }
+
     pub fn export_dir(&self) -> PathBuf {
         self.root.join("export")
     }
@@ -86,6 +91,100 @@ impl CheckpointRoot {
 
     pub fn export_manifest(&self) -> PathBuf {
         self.export_dir().join("manifest.json")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckpointStore {
+    root: CheckpointRoot,
+    strict: bool,
+}
+
+impl CheckpointStore {
+    pub fn new(root: PathBuf, strict: bool) -> Self {
+        Self {
+            root: CheckpointRoot::new(root),
+            strict,
+        }
+    }
+
+    pub fn selected_k(&self, k: usize) -> Self {
+        Self {
+            root: self.root.selected_k_root(k),
+            strict: self.strict,
+        }
+    }
+
+    pub fn root(&self) -> &CheckpointRoot {
+        &self.root
+    }
+
+    pub fn load_preprocess(&self) -> Result<Option<Vec<Read>>, CheckpointError> {
+        load_preprocess_checkpoint(&self.root, self.strict)
+    }
+
+    pub fn load_pair_layout(&self) -> Result<Option<usize>, CheckpointError> {
+        load_pair_layout_checkpoint(&self.root)
+    }
+
+    pub fn write_preprocess(
+        &self,
+        reads: &[Read],
+        paired_r1_len: Option<usize>,
+    ) -> Result<(), CheckpointError> {
+        write_preprocess_checkpoint(&self.root, reads, self.strict, paired_r1_len)
+    }
+
+    pub fn load_counts(&self, k: usize) -> Result<Option<KmerCounts>, CheckpointError> {
+        load_counts_checkpoint(&self.root, self.strict, k)
+    }
+
+    pub fn write_counts(&self, k: usize, counts: &[(Vec<u8>, u64)]) -> Result<(), CheckpointError> {
+        write_counts_checkpoint(&self.root, k, counts, self.strict)
+    }
+
+    pub fn load_graph(
+        &self,
+        k: usize,
+        identity: &GraphCheckpointIdentity,
+    ) -> Result<Option<DbgGraph>, CheckpointError> {
+        load_graph_checkpoint(&self.root, self.strict, k, identity)
+    }
+
+    pub fn write_graph(
+        &self,
+        graph: &DbgGraph,
+        identity: &GraphCheckpointIdentity,
+    ) -> Result<(), CheckpointError> {
+        write_graph_checkpoint(&self.root, graph, self.strict, identity)
+    }
+
+    pub fn load_graph_stage_artifacts(
+        &self,
+        k: usize,
+    ) -> Result<Option<GraphStageArtifacts>, CheckpointError> {
+        load_graph_stage_artifacts_checkpoint(&self.root, k)
+    }
+
+    pub fn write_graph_stage_artifacts(
+        &self,
+        k: usize,
+        artifacts: &GraphStageArtifacts,
+    ) -> Result<(), CheckpointError> {
+        write_graph_stage_artifacts_checkpoint(&self.root, k, artifacts)
+    }
+
+    pub fn load_export(&self, k: usize) -> Result<Option<ExportSequences>, CheckpointError> {
+        load_export_checkpoint(&self.root, self.strict, k)
+    }
+
+    pub fn write_export(
+        &self,
+        k: usize,
+        unitigs: &[(String, Vec<u8>)],
+        contigs: &[(String, Vec<u8>)],
+    ) -> Result<(), CheckpointError> {
+        write_export_checkpoint(&self.root, k, unitigs, contigs, self.strict)
     }
 }
 
@@ -126,6 +225,19 @@ struct GraphCheckpointPayload {
     diploid_insert_stddev_bp: Option<u64>,
     #[serde(default)]
     phase2_mate_bridge_v1: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphStageArtifacts {
+    pub simplify_stats: SimplifyStats,
+    pub simplify_decisions: SimplifyDecisionLog,
+    pub mate_bridge_stats: Option<mate::MateBridgeStats>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GraphStageArtifactsPayload {
+    k: usize,
+    artifacts: GraphStageArtifacts,
 }
 
 /// Fingerprint for **graph** checkpoint reuse on resume: must match the stored payload or the graph is rebuilt.
@@ -330,6 +442,10 @@ pub fn write_graph_checkpoint(
     identity: &GraphCheckpointIdentity,
 ) -> Result<(), CheckpointError> {
     remove_export_checkpoint(ck)?;
+    let artifacts_path = ck.graph_stage_artifacts_json();
+    if artifacts_path.exists() {
+        fs::remove_file(&artifacts_path)?;
+    }
     fs::create_dir_all(ck.graph_dir())?;
     let mut nodes: Vec<(String, u64)> = graph
         .node_mul
@@ -383,6 +499,37 @@ pub fn write_graph_checkpoint(
         fs::write(ck.graph_manifest(), serde_json::to_vec_pretty(&manifest)?)?;
     }
     Ok(())
+}
+
+pub fn write_graph_stage_artifacts_checkpoint(
+    ck: &CheckpointRoot,
+    k: usize,
+    artifacts: &GraphStageArtifacts,
+) -> Result<(), CheckpointError> {
+    fs::create_dir_all(ck.graph_dir())?;
+    let payload = GraphStageArtifactsPayload {
+        k,
+        artifacts: artifacts.clone(),
+    };
+    let mut body = serde_json::to_vec_pretty(&payload)?;
+    body.push(b'\n');
+    fs::write(ck.graph_stage_artifacts_json(), body)?;
+    Ok(())
+}
+
+pub fn load_graph_stage_artifacts_checkpoint(
+    ck: &CheckpointRoot,
+    k: usize,
+) -> Result<Option<GraphStageArtifacts>, CheckpointError> {
+    let path = ck.graph_stage_artifacts_json();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let payload: GraphStageArtifactsPayload = serde_json::from_slice(&fs::read(path)?)?;
+    if payload.k != k {
+        return Ok(None);
+    }
+    Ok(Some(payload.artifacts))
 }
 
 /// Load simplified **DBG** checkpoint if present, **`k`** matches, and **diploid resume identity** matches;

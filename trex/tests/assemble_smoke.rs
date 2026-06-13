@@ -311,6 +311,51 @@ fn annotations_sidecar_regenerates_on_resume() {
 
     assert_eq!(first_annotations, second_annotations);
     assert_eq!(first.graph_annotations, second.graph_annotations);
+    assert!(second.outputs.stages_path().exists());
+    assert!(!second.stage_reports.is_empty());
+}
+
+#[test]
+fn graph_resume_preserves_simplification_and_mate_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let r1 = write_tmp(dir.path(), "r1.fq", b"@frag/1\nACGTACGT\n+\nIIIIIIII\n");
+    let r2 = write_tmp(dir.path(), "r2.fq", b"@frag/2\nCGTAAAAA\n+\nIIIIIIII\n");
+    let ck = dir.path().join("ck");
+    let mut params = AssembleParams {
+        r1_path: r1,
+        r2_path: Some(r2),
+        k: 4,
+        trusted_threshold: 1,
+        checkpoint_root: Some(ck.clone()),
+        resume: false,
+        strict_checkpoints: false,
+        simplify: SimplifyOverrides::default(),
+        diploid: DiploidParams {
+            enabled: true,
+            insert_mean_bp: Some(8),
+            insert_stddev_bp: None,
+            ..Default::default()
+        },
+        multi_k: Default::default(),
+        outputs: outputs_in(dir.path()),
+    };
+    let first = assemble_illumina(&params).unwrap();
+    let first_evidence = std::fs::read_to_string(first.outputs.evidence_path()).unwrap();
+    let first_simplification =
+        std::fs::read_to_string(first.outputs.simplification_path()).unwrap();
+    assert!(ck.join("graph/stage_artifacts.json").exists());
+
+    params.resume = true;
+    let second = assemble_illumina(&params).unwrap();
+    let second_evidence = std::fs::read_to_string(second.outputs.evidence_path()).unwrap();
+    let second_simplification =
+        std::fs::read_to_string(second.outputs.simplification_path()).unwrap();
+
+    assert_eq!(first.evidence, second.evidence);
+    assert_eq!(first.mate_bridge_stats, second.mate_bridge_stats);
+    assert_eq!(first.simplify_decisions, second.simplify_decisions);
+    assert_eq!(first_evidence, second_evidence);
+    assert_eq!(first_simplification, second_simplification);
 }
 
 #[test]

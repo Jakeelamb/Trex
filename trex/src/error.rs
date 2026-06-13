@@ -68,6 +68,8 @@ pub enum KmerError {
     KZero(usize),
     #[error("k ({k}) is larger than a counted segment (length {segment_len})")]
     KLongerThanSegment { k: usize, segment_len: usize },
+    #[error("non-ACGT byte {byte} at position {pos}")]
+    NonAcgtByte { pos: usize, byte: u8 },
 }
 
 /// Checkpoint directory I/O and integrity.

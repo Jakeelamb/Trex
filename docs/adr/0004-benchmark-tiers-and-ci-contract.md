@@ -1,4 +1,4 @@
-# ADR 0003 — Benchmark tiers and CI contract
+# ADR 0004 — Benchmark tiers and CI contract
 
 ## Status
 
@@ -30,7 +30,7 @@ Trex needs architecture and product claims to have local or CI pass/fail loops. 
 
 5. **Artifacts**
    - Smoke artifacts remain under `target/`.
-   - `cargo run -p xtask -- bench` writes machine-readable row reports under `target/benchmarks/`, including wall-clock time, script exit codes, max RSS where GNU time is available, observed Trex counters, FASTQ/FASTA/GFA assembly metrics, and declared base plus tier-specific artifact sizes.
+   - `cargo run -p xtask -- bench` writes machine-readable row reports under `target/benchmarks/`, including wall-clock time, script exit codes, max RSS where GNU time is available, observed Trex counters, FASTQ/FASTA/GFA assembly metrics, stage timing summaries, and declared base plus tier-specific artifact sizes.
    - Matrix rows may declare `[rows.trex]` for direct release `trex` executions when the row should measure the product binary rather than only shell script layers. The first direct row is the nightly/manual PhiX174 real-reference micro benchmark.
    - QUAST outputs are written under `target/quast-phase2-synthetic/` when the optional row runs. Uploading those artifacts from nightly CI is allowed but not mandatory in this ADR.
 

@@ -19,6 +19,7 @@ use crate::illumina::fragmentation::FragmentationReport;
 use crate::illumina::multik::MultiKSelectionReport;
 use crate::illumina::pipeline::AssembleOutputs;
 use crate::illumina::scaffold::{scaffold_fasta_records, scaffold_gfa_paths, ScaffoldArtifact};
+use crate::illumina::stage::AssemblyStageReport;
 use crate::illumina::trust::TrustDiagnosticsReport;
 
 pub struct AssemblyOutputBundle<'a> {
@@ -37,6 +38,7 @@ pub struct AssemblyOutputBundle<'a> {
     pub audit_report: &'a AssemblyAuditReport,
     pub diploid_evidence: &'a DiploidEvidenceReport,
     pub diploid_enabled: bool,
+    pub stage_reports: &'a [AssemblyStageReport],
 }
 
 pub struct AssemblyOutputWriter<'a> {
@@ -96,6 +98,7 @@ impl<'a> AssemblyOutputWriter<'a> {
         write_json_pretty(&self.outputs.audit_json_path(), bundle.audit_report)?;
         write_audit_tsv(&self.outputs.audit_tsv_path(), bundle.audit_report)?;
         write_json_pretty(&self.outputs.diploid_path(), bundle.diploid_evidence)?;
+        write_stage_reports(&self.outputs.stages_path(), bundle.stage_reports)?;
         Ok(())
     }
 
@@ -122,6 +125,25 @@ impl<'a> AssemblyOutputWriter<'a> {
         }
         Ok(())
     }
+}
+
+#[derive(Serialize)]
+struct StageReportsSidecar<'a> {
+    schema_version: u64,
+    stages: &'a [AssemblyStageReport],
+}
+
+fn write_stage_reports(path: &Path, reports: &[AssemblyStageReport]) -> Result<(), TrexError> {
+    if path.as_os_str() == "-" {
+        return Ok(());
+    }
+    write_json_pretty(
+        path,
+        &StageReportsSidecar {
+            schema_version: 1,
+            stages: reports,
+        },
+    )
 }
 
 fn write_scaffolds_fasta(path: &Path, records: &[(String, Vec<u8>)]) -> Result<(), TrexError> {

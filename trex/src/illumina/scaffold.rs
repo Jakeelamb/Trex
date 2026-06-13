@@ -8,8 +8,9 @@ use crate::illumina::mate::{
     MatePairOrientation, MateSupportHistogram,
 };
 use crate::illumina::promotion::PromotionPolicySnapshot;
+use crate::illumina::scaffold_path::ScaffoldPathBuilder;
+pub use crate::illumina::scaffold_projection::{scaffold_fasta_records, scaffold_gfa_paths};
 use crate::illumina::scaffold_promotion::{accepted_endpoint_join, ScaffoldPromotionEngine};
-use crate::kmer::reverse_complement;
 
 pub const SCAFFOLD_ARTIFACT_SCHEMA_VERSION: u64 = 6;
 
@@ -95,93 +96,6 @@ impl ScaffoldArtifact {
     }
 }
 
-pub fn scaffold_fasta_records(
-    artifact: &ScaffoldArtifact,
-    unitig_records: &[(String, Vec<u8>)],
-) -> Vec<(String, Vec<u8>)> {
-    artifact
-        .paths
-        .iter()
-        .filter_map(|path| {
-            scaffold_path_sequence(path, unitig_records).map(|seq| (path.id.clone(), seq))
-        })
-        .collect()
-}
-
-pub fn scaffold_gfa_paths(artifact: &ScaffoldArtifact) -> Vec<(String, Vec<(usize, char)>)> {
-    artifact
-        .paths
-        .iter()
-        .filter_map(|path| {
-            let mut steps = Vec::with_capacity(path.steps.len());
-            for step in &path.steps {
-                let idx = parse_utg_segment(&step.segment)?;
-                if !matches!(step.orient, '+' | '-') {
-                    return None;
-                }
-                steps.push((idx + 1, step.orient));
-            }
-            (!steps.is_empty()).then_some((path.id.clone(), steps))
-        })
-        .collect()
-}
-
-fn scaffold_path_sequence(
-    path: &ScaffoldPath,
-    unitig_records: &[(String, Vec<u8>)],
-) -> Option<Vec<u8>> {
-    let first = path.steps.first()?;
-    let mut seq = oriented_segment_sequence(first, unitig_records)?;
-    for idx in 1..path.steps.len() {
-        let step = &path.steps[idx];
-        let link = path.links.get(idx - 1)?;
-        let mut next = oriented_segment_sequence(step, unitig_records)?;
-        if link.source == "mate_bridge_existing_edge" {
-            let overlap = overlap_cigar_bases(&link.overlap_cigar);
-            if overlap < next.len() {
-                next = next[overlap..].to_vec();
-            } else {
-                next.clear();
-            }
-        } else if let Some(gap) = positive_gap_len(link) {
-            seq.extend(std::iter::repeat(b'N').take(gap));
-        }
-        seq.extend(next);
-    }
-    Some(seq)
-}
-
-fn oriented_segment_sequence(
-    step: &ScaffoldStep,
-    unitig_records: &[(String, Vec<u8>)],
-) -> Option<Vec<u8>> {
-    let idx = parse_utg_segment(&step.segment)?;
-    let seq = unitig_records.get(idx)?.1.clone();
-    match step.orient {
-        '+' => Some(seq),
-        '-' => Some(reverse_complement(&seq)),
-        _ => None,
-    }
-}
-
-fn parse_utg_segment(segment: &str) -> Option<usize> {
-    let suffix = segment.strip_prefix("utg")?;
-    let one_based = suffix.parse::<usize>().ok()?;
-    one_based.checked_sub(1)
-}
-
-fn positive_gap_len(link: &ScaffoldLink) -> Option<usize> {
-    let gap = link.distance.as_ref()?.estimated_gap_bp;
-    (gap > 0).then_some(gap as usize)
-}
-
-fn overlap_cigar_bases(cigar: &str) -> usize {
-    cigar
-        .strip_suffix('M')
-        .and_then(|digits| digits.parse::<usize>().ok())
-        .unwrap_or(0)
-}
-
 pub fn build_scaffold_artifact(
     candidates: &[MateBridgeCandidate],
     unitig_paths: &[Vec<Vec<u8>>],
@@ -189,7 +103,7 @@ pub fn build_scaffold_artifact(
     fragmentation: &FragmentationReport,
 ) -> ScaffoldArtifact {
     let mut paths = Vec::new();
-    let overlap_cigar = format!("{}M", k.saturating_sub(1));
+    let path_builder = ScaffoldPathBuilder::new(unitig_paths, k);
 
     let promotion_policy = PromotionPolicySnapshot::default();
     let endpoint_join_candidates =
@@ -197,58 +111,10 @@ pub fn build_scaffold_artifact(
             .ranked_endpoint_joins();
     for candidate in candidates {
         let accepted_join = accepted_endpoint_join(&endpoint_join_candidates, candidate);
-        if !candidate.existing_dbg_edge && accepted_join.is_none() {
-            continue;
-        }
-        let Some((from_idx, from_orient, to_idx, to_orient)) = (if candidate.existing_dbg_edge {
-            candidate_unitig_tail_head(candidate, unitig_paths)
-        } else {
-            accepted_join.and_then(|join| candidate_unitig_endpoint_steps(join, unitig_paths))
-        }) else {
-            continue;
-        };
-        if from_idx == to_idx {
-            continue;
-        }
-        let from_segment = format!("utg{:06}", from_idx + 1);
-        let to_segment = format!("utg{:06}", to_idx + 1);
         let id = format!("scf{:06}", paths.len() + 1);
-        paths.push(ScaffoldPath {
-            id,
-            steps: vec![
-                ScaffoldStep {
-                    segment: from_segment.clone(),
-                    orient: from_orient,
-                },
-                ScaffoldStep {
-                    segment: to_segment.clone(),
-                    orient: to_orient,
-                },
-            ],
-            links: vec![ScaffoldLink {
-                constraint_id: candidate.constraint_id.clone(),
-                from_segment,
-                from_orient,
-                to_segment,
-                to_orient,
-                from_context: candidate.from_context.clone(),
-                to_context: candidate.to_context.clone(),
-                orientation: candidate.orientation,
-                distance: candidate.distance.clone(),
-                distance_bin: candidate.distance_bin.clone(),
-                overlap_cigar: overlap_cigar.clone(),
-                support_pairs: candidate.support_pairs,
-                conflict_pairs: candidate.conflict_pairs,
-                support_histogram: candidate.support_histogram.clone(),
-                blockers: candidate.blockers.clone(),
-                source: if candidate.existing_dbg_edge {
-                    "mate_bridge_existing_edge"
-                } else {
-                    "mate_pair_endpoint_join_promoted_sidecar"
-                }
-                .to_string(),
-            }],
-        });
+        if let Some(path) = path_builder.path_for_candidate(candidate, accepted_join, id) {
+            paths.push(path);
+        }
     }
 
     ScaffoldArtifact {
@@ -258,55 +124,6 @@ pub fn build_scaffold_artifact(
         endpoint_join_candidates,
         paths,
     }
-}
-
-fn candidate_unitig_tail_head(
-    candidate: &MateBridgeCandidate,
-    unitig_paths: &[Vec<Vec<u8>>],
-) -> Option<(usize, char, usize, char)> {
-    let mut from_idx = None;
-    let mut to_idx = None;
-    for (idx, path) in unitig_paths.iter().enumerate() {
-        if endpoint_node_matches(path.last(), &candidate.from_node) {
-            from_idx = Some(idx);
-        }
-        if endpoint_node_matches(path.first(), &candidate.to_node) {
-            to_idx = Some(idx);
-        }
-    }
-    Some((from_idx?, '+', to_idx?, '+'))
-}
-
-fn candidate_unitig_endpoint_steps(
-    join: &EndpointJoinCandidate,
-    unitig_paths: &[Vec<Vec<u8>>],
-) -> Option<(usize, char, usize, char)> {
-    let mut from_step = None;
-    let mut to_step = None;
-    for (idx, path) in unitig_paths.iter().enumerate() {
-        let first = path.first();
-        let last = path.last();
-        if join.from_side == "left" && endpoint_node_matches(first, &join.from_node) {
-            from_step = Some((idx, '-'));
-        }
-        if join.from_side == "right" && endpoint_node_matches(last, &join.from_node) {
-            from_step = Some((idx, '+'));
-        }
-        if join.to_side == "left" && endpoint_node_matches(first, &join.to_node) {
-            to_step = Some((idx, '+'));
-        }
-        if join.to_side == "right" && endpoint_node_matches(last, &join.to_node) {
-            to_step = Some((idx, '-'));
-        }
-    }
-    let (from_idx, from_orient) = from_step?;
-    let (to_idx, to_orient) = to_step?;
-    Some((from_idx, from_orient, to_idx, to_orient))
-}
-
-fn endpoint_node_matches(node: Option<&Vec<u8>>, expected: &str) -> bool {
-    node.map(|node| node.as_slice() == expected.as_bytes())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

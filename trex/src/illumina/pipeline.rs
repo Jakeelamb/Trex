@@ -14,15 +14,13 @@ use crate::dbg::{
 use crate::error::{GraphError, IngestError, TrexError};
 use crate::evidence::EvidenceLedger;
 use crate::illumina::audit::{audit_assembly, AssemblyAuditReport};
-use crate::illumina::checkpoint::{self, CheckpointRoot, GraphCheckpointIdentity};
+use crate::illumina::checkpoint::{CheckpointStore, GraphCheckpointIdentity, GraphStageArtifacts};
 use crate::illumina::counts::enumerate_sorted_counts;
 use crate::illumina::diploid::{
     build_diploid_evidence, DiploidEvidenceReport, ParentReferenceParams,
 };
-use crate::illumina::fasta::parse_fasta;
-use crate::illumina::fastq::parse_fastq;
 use crate::illumina::fragmentation::{diagnose_fragmentation, FragmentationReport};
-use crate::illumina::io::read_maybe_gzip;
+use crate::illumina::io::{read_fasta_records_maybe_gzip, read_fastq_records_maybe_gzip};
 use crate::illumina::mate;
 use crate::illumina::multik::{select_k, MultiKParams, MultiKSelectionReport};
 use crate::illumina::output::{AssemblyOutputBundle, AssemblyOutputWriter};
@@ -30,7 +28,7 @@ use crate::illumina::paired::validate_pair_parity;
 use crate::illumina::phase2_primary;
 use crate::illumina::read::Read;
 use crate::illumina::scaffold::{build_scaffold_artifact, ScaffoldArtifact};
-use crate::illumina::stage::{AssemblyStage, AssemblyStageRunner};
+use crate::illumina::stage::{AssemblyStage, AssemblyStageReport, AssemblyStageRunner};
 use crate::illumina::trust::{build_trust_diagnostics, TrustDiagnosticsReport};
 use crate::kmer::apply_trusted_threshold;
 
@@ -169,6 +167,14 @@ impl AssembleOutputs {
             self.resolve(Path::new("diploid.json"))
         }
     }
+
+    pub fn stages_path(&self) -> PathBuf {
+        if self.out_dir.as_os_str() == "-" {
+            PathBuf::from("-")
+        } else {
+            self.resolve(Path::new("stages.json"))
+        }
+    }
 }
 
 /// Optional overrides for **Phase-1 graph simplification** (tips + bounded diamond bubbles +
@@ -285,6 +291,55 @@ fn stitch_unitigs_and_contigs(
     Ok((unitig_records, contig_records, unitig_paths, contig_paths))
 }
 
+struct BuiltGraph {
+    graph: DbgGraph,
+    simplify_stats: SimplifyStats,
+    simplify_decisions: SimplifyDecisionLog,
+    mate_bridge_stats: Option<mate::MateBridgeStats>,
+}
+
+impl BuiltGraph {
+    fn stage_artifacts(&self) -> GraphStageArtifacts {
+        GraphStageArtifacts {
+            simplify_stats: self.simplify_stats,
+            simplify_decisions: self.simplify_decisions.clone(),
+            mate_bridge_stats: self.mate_bridge_stats.clone(),
+        }
+    }
+}
+
+struct BuildGraphInputs<'a> {
+    reads: &'a [Read],
+    trusted: &'a [(Vec<u8>, u64)],
+    paired_r1_len: Option<usize>,
+    selected_k: usize,
+    simplify_params: &'a SimplifyParams,
+    diploid_simplify: Option<DiploidSimplifyMode>,
+    graph_identity: GraphCheckpointIdentity,
+    diploid: &'a DiploidParams,
+}
+
+fn build_simplified_graph(inputs: BuildGraphInputs<'_>) -> Result<BuiltGraph, TrexError> {
+    let mut graph = build_dbg(inputs.reads, inputs.selected_k, inputs.trusted)?;
+    let mate_bridge_stats = apply_phase2_mate_bridge(
+        &mut graph,
+        inputs.reads,
+        inputs.paired_r1_len,
+        inputs.selected_k,
+        inputs.diploid.insert_mean_bp,
+        inputs.diploid.insert_stddev_bp,
+        inputs.graph_identity.phase2_mate_bridge_v1,
+    );
+    let (simplify_stats, simplify_decisions) =
+        run_simplification_schedule(&mut graph, inputs.simplify_params, inputs.diploid_simplify);
+    Ok(BuiltGraph {
+        graph,
+        simplify_stats,
+        simplify_decisions,
+        mate_bridge_stats,
+    })
+}
+
 /// **Phase-2 Illumina diploid** options (experimental). When `enabled`, diamond bubble simplification
 /// retains near-balanced branches and GFA exports carry a `trex-phase2-illumina` header tag.
 #[derive(Debug, Clone, Default)]
@@ -331,6 +386,7 @@ pub struct AssembleResult {
     pub audit_report: AssemblyAuditReport,
     pub diploid_evidence: DiploidEvidenceReport,
     pub mate_bridge_stats: Option<mate::MateBridgeStats>,
+    pub stage_reports: Vec<AssemblyStageReport>,
     pub unitig_count: usize,
     pub contig_count: usize,
     pub outputs: AssembleOutputs,
@@ -360,20 +416,18 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
     let ck = params
         .checkpoint_root
         .as_ref()
-        .map(|p| CheckpointRoot::new(p.clone()));
+        .map(|p| CheckpointStore::new(p.clone(), params.strict_checkpoints));
 
     let (reads, paired_r1_len) = stages.run(AssemblyStage::LoadReads, || {
         if params.resume {
             match &ck {
-                Some(c) => {
-                    match checkpoint::load_preprocess_checkpoint(c, params.strict_checkpoints)? {
-                        Some(r) => {
-                            let pl = checkpoint::load_pair_layout_checkpoint(c)?;
-                            Ok::<_, TrexError>((r, pl))
-                        }
-                        None => Ok(load_reads(params)?),
+                Some(c) => match c.load_preprocess()? {
+                    Some(r) => {
+                        let pl = c.load_pair_layout()?;
+                        Ok::<_, TrexError>((r, pl))
                     }
-                }
+                    None => Ok(load_reads(params)?),
+                },
                 None => Err(TrexError::from(IngestError::ResumeRequiresCheckpointRoot)),
             }
         } else {
@@ -407,7 +461,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
     }
     let selected_ck = ck.as_ref().map(|c| {
         if multi_k_selection.enabled {
-            c.selected_k_root(selected_k)
+            c.selected_k(selected_k)
         } else {
             c.clone()
         }
@@ -415,28 +469,17 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
 
     if let Some(ref c) = ck {
         stages.run(AssemblyStage::WritePreprocessCheckpoint, || {
-            checkpoint::write_preprocess_checkpoint(
-                c,
-                &reads,
-                params.strict_checkpoints,
-                paired_r1_len,
-            )
+            c.write_preprocess(&reads, paired_r1_len)
         })?;
     }
 
     let merged = stages.run(AssemblyStage::CountKmers, || {
         if params.resume {
             match &selected_ck {
-                Some(c) => {
-                    match checkpoint::load_counts_checkpoint(
-                        c,
-                        params.strict_checkpoints,
-                        selected_k,
-                    )? {
-                        Some(rows) => Ok::<_, TrexError>(rows),
-                        None => Ok(enumerate_sorted_counts(&reads, selected_k)?),
-                    }
-                }
+                Some(c) => match c.load_counts(selected_k)? {
+                    Some(rows) => Ok::<_, TrexError>(rows),
+                    None => Ok(enumerate_sorted_counts(&reads, selected_k)?),
+                },
                 None => Ok(enumerate_sorted_counts(&reads, selected_k)?),
             }
         } else {
@@ -455,7 +498,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
 
     if let Some(ref c) = selected_ck {
         stages.run(AssemblyStage::WriteCountsCheckpoint, || {
-            checkpoint::write_counts_checkpoint(c, selected_k, &merged, params.strict_checkpoints)
+            c.write_counts(selected_k, &merged)
         })?;
     }
 
@@ -473,65 +516,88 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
     let graph = stages.run(AssemblyStage::BuildSimplifiedGraph, || {
         if let Some(ref c) = selected_ck {
             if params.resume {
-                match checkpoint::load_graph_checkpoint(
-                    c,
-                    params.strict_checkpoints,
-                    selected_k,
-                    &graph_ck_id,
-                )? {
-                    Some(g) => Ok::<_, TrexError>(g),
+                match c.load_graph(selected_k, &graph_ck_id)? {
+                    Some(g) => match c.load_graph_stage_artifacts(selected_k)? {
+                        Some(artifacts) => {
+                            simplify_stats = artifacts.simplify_stats;
+                            simplify_decisions = artifacts.simplify_decisions;
+                            mate_bridge_stats = artifacts.mate_bridge_stats;
+                            Ok::<_, TrexError>(g)
+                        }
+                        None => {
+                            tracing::warn!(
+                                "graph checkpoint missing stage artifacts; rebuilding graph to avoid stale sidecars"
+                            );
+                            let built = build_simplified_graph(BuildGraphInputs {
+                                reads: &reads,
+                                trusted: &trusted,
+                                paired_r1_len,
+                                selected_k,
+                                simplify_params: &simplify_params,
+                                diploid_simplify,
+                                graph_identity: graph_ck_id,
+                                diploid: &params.diploid,
+                            })?;
+                            simplify_stats = built.simplify_stats;
+                            simplify_decisions = built.simplify_decisions.clone();
+                            mate_bridge_stats = built.mate_bridge_stats.clone();
+                            c.write_graph(&built.graph, &graph_ck_id)?;
+                            c.write_graph_stage_artifacts(selected_k, &built.stage_artifacts())?;
+                            Ok(built.graph)
+                        }
+                    },
                     None => {
-                        let mut g = build_dbg(&reads, selected_k, &trusted)?;
-                        mate_bridge_stats = apply_phase2_mate_bridge(
-                            &mut g,
-                            &reads,
+                        let built = build_simplified_graph(BuildGraphInputs {
+                            reads: &reads,
+                            trusted: &trusted,
                             paired_r1_len,
                             selected_k,
-                            params.diploid.insert_mean_bp,
-                            params.diploid.insert_stddev_bp,
-                            graph_ck_id.phase2_mate_bridge_v1,
-                        );
-                        (simplify_stats, simplify_decisions) =
-                            run_simplification_schedule(&mut g, &simplify_params, diploid_simplify);
-                        checkpoint::write_graph_checkpoint(
-                            c,
-                            &g,
-                            params.strict_checkpoints,
-                            &graph_ck_id,
-                        )?;
-                        Ok(g)
+                            simplify_params: &simplify_params,
+                            diploid_simplify,
+                            graph_identity: graph_ck_id,
+                            diploid: &params.diploid,
+                        })?;
+                        simplify_stats = built.simplify_stats;
+                        simplify_decisions = built.simplify_decisions.clone();
+                        mate_bridge_stats = built.mate_bridge_stats.clone();
+                        c.write_graph(&built.graph, &graph_ck_id)?;
+                        c.write_graph_stage_artifacts(selected_k, &built.stage_artifacts())?;
+                        Ok(built.graph)
                     }
                 }
             } else {
-                let mut g = build_dbg(&reads, selected_k, &trusted)?;
-                mate_bridge_stats = apply_phase2_mate_bridge(
-                    &mut g,
-                    &reads,
+                let built = build_simplified_graph(BuildGraphInputs {
+                    reads: &reads,
+                    trusted: &trusted,
                     paired_r1_len,
                     selected_k,
-                    params.diploid.insert_mean_bp,
-                    params.diploid.insert_stddev_bp,
-                    graph_ck_id.phase2_mate_bridge_v1,
-                );
-                (simplify_stats, simplify_decisions) =
-                    run_simplification_schedule(&mut g, &simplify_params, diploid_simplify);
-                checkpoint::write_graph_checkpoint(c, &g, params.strict_checkpoints, &graph_ck_id)?;
-                Ok(g)
+                    simplify_params: &simplify_params,
+                    diploid_simplify,
+                    graph_identity: graph_ck_id,
+                    diploid: &params.diploid,
+                })?;
+                simplify_stats = built.simplify_stats;
+                simplify_decisions = built.simplify_decisions.clone();
+                mate_bridge_stats = built.mate_bridge_stats.clone();
+                c.write_graph(&built.graph, &graph_ck_id)?;
+                c.write_graph_stage_artifacts(selected_k, &built.stage_artifacts())?;
+                Ok(built.graph)
             }
         } else {
-            let mut g = build_dbg(&reads, selected_k, &trusted)?;
-            mate_bridge_stats = apply_phase2_mate_bridge(
-                &mut g,
-                &reads,
+            let built = build_simplified_graph(BuildGraphInputs {
+                reads: &reads,
+                trusted: &trusted,
                 paired_r1_len,
                 selected_k,
-                params.diploid.insert_mean_bp,
-                params.diploid.insert_stddev_bp,
-                graph_ck_id.phase2_mate_bridge_v1,
-            );
-            (simplify_stats, simplify_decisions) =
-                run_simplification_schedule(&mut g, &simplify_params, diploid_simplify);
-            Ok(g)
+                simplify_params: &simplify_params,
+                diploid_simplify,
+                graph_identity: graph_ck_id,
+                diploid: &params.diploid,
+            })?;
+            simplify_stats = built.simplify_stats;
+            simplify_decisions = built.simplify_decisions;
+            mate_bridge_stats = built.mate_bridge_stats;
+            Ok(built.graph)
         }
     })?;
 
@@ -569,30 +635,20 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
     let (unitig_records, mut contig_records, unitig_paths, contig_paths) =
         stages.run(AssemblyStage::StitchUnitigsAndContigs, || {
             match (&selected_ck, params.resume) {
-                (Some(c), true) => {
-                    match checkpoint::load_export_checkpoint(
-                        c,
-                        params.strict_checkpoints,
-                        selected_k,
-                    )? {
-                        Some((ur, cr)) => {
-                            let up = extract_unitigs(&graph);
-                            let cp = reference_contig_paths(
-                                &graph,
-                                &forward,
-                                selected_k,
-                                contig_tie_break,
-                            )?;
-                            Ok::<_, TrexError>((ur, cr, up, cp))
-                        }
-                        None => Ok(stitch_unitigs_and_contigs(
-                            &graph,
-                            &forward,
-                            selected_k,
-                            contig_tie_break,
-                        )?),
+                (Some(c), true) => match c.load_export(selected_k)? {
+                    Some((ur, cr)) => {
+                        let up = extract_unitigs(&graph);
+                        let cp =
+                            reference_contig_paths(&graph, &forward, selected_k, contig_tie_break)?;
+                        Ok::<_, TrexError>((ur, cr, up, cp))
                     }
-                }
+                    None => Ok(stitch_unitigs_and_contigs(
+                        &graph,
+                        &forward,
+                        selected_k,
+                        contig_tie_break,
+                    )?),
+                },
                 _ => Ok(stitch_unitigs_and_contigs(
                     &graph,
                     &forward,
@@ -692,17 +748,12 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
 
     if let Some(ref c) = selected_ck {
         stages.run(AssemblyStage::WriteExportCheckpoint, || {
-            checkpoint::write_export_checkpoint(
-                c,
-                selected_k,
-                &unitig_records,
-                &contig_records,
-                params.strict_checkpoints,
-            )
+            c.write_export(selected_k, &unitig_records, &contig_records)
         })?;
     }
 
     stages.run(AssemblyStage::WriteOutputs, || {
+        let stage_reports = stages.reports();
         AssemblyOutputWriter::new(&params.outputs).write_all(AssemblyOutputBundle {
             graph: &graph,
             unitig_records: &unitig_records,
@@ -719,6 +770,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
             audit_report: &audit_report,
             diploid_evidence: &diploid_evidence,
             diploid_enabled: params.diploid.enabled,
+            stage_reports: &stage_reports,
         })
     })?;
 
@@ -737,6 +789,7 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
         audit_report,
         diploid_evidence,
         mate_bridge_stats,
+        stage_reports: stages.reports(),
         unitig_count: unitig_records.len(),
         contig_count: contig_records.len(),
         outputs: params.outputs.clone(),
@@ -744,23 +797,20 @@ pub fn assemble_illumina(params: &AssembleParams) -> Result<AssembleResult, Trex
 }
 
 fn load_reads(params: &AssembleParams) -> Result<(Vec<Read>, Option<usize>), TrexError> {
-    let r1_bytes =
-        read_maybe_gzip(&params.r1_path).map_err(|e| TrexError::Ingest(IngestError::Io(e)))?;
     let r1_raw = if input_is_fasta(&params.r1_path) {
-        parse_fasta(&r1_bytes)?
+        read_fasta_records_maybe_gzip(&params.r1_path)?
     } else {
-        parse_fastq(&r1_bytes)?
+        read_fastq_records_maybe_gzip(&params.r1_path)?
     };
     let r1_reads = crate::illumina::preprocess::preprocess_records(r1_raw)?;
 
     match &params.r2_path {
         None => Ok((r1_reads, None)),
         Some(p) => {
-            let r2_bytes = read_maybe_gzip(p).map_err(|e| TrexError::Ingest(IngestError::Io(e)))?;
             let r2_raw = if input_is_fasta(p) {
-                parse_fasta(&r2_bytes)?
+                read_fasta_records_maybe_gzip(p)?
             } else {
-                parse_fastq(&r2_bytes)?
+                read_fastq_records_maybe_gzip(p)?
             };
             let r2_reads = crate::illumina::preprocess::preprocess_records(r2_raw)?;
             validate_pair_parity(&r1_reads, &r2_reads)?;

@@ -62,6 +62,17 @@ fn parse_assemble_file_config(text: &str) -> Result<AssembleFileConfig, toml::de
     }
 }
 
+fn primary_stdout_target_count(outputs: &AssembleOutputs) -> usize {
+    [
+        &outputs.unitigs_fasta,
+        &outputs.contigs_fasta,
+        &outputs.gfa_path,
+    ]
+    .into_iter()
+    .filter(|path| path.as_os_str() == "-")
+    .count()
+}
+
 #[derive(Parser)]
 #[command(
     name = "trex",
@@ -320,6 +331,19 @@ async fn main() -> std::process::ExitCode {
                     },
                 };
 
+                let outputs = AssembleOutputs {
+                    out_dir,
+                    unitigs_fasta,
+                    contigs_fasta,
+                    gfa_path,
+                };
+                if primary_stdout_target_count(&outputs) > 1 {
+                    tracing::error!(
+                        "at most one primary assembly output may use `-`; write the other FASTA/GFA outputs to files"
+                    );
+                    return std::process::ExitCode::from(1);
+                }
+
                 let params = AssembleParams {
                     r1_path: r1,
                     r2_path: r2,
@@ -334,12 +358,7 @@ async fn main() -> std::process::ExitCode {
                         auto: auto_k,
                         ladder: resolved_k_ladder,
                     },
-                    outputs: AssembleOutputs {
-                        out_dir,
-                        unitigs_fasta,
-                        contigs_fasta,
-                        gfa_path,
-                    },
+                    outputs,
                 };
                 run_assemble(params).await
             }
@@ -404,4 +423,23 @@ async fn run_assemble(params: AssembleParams) -> Result<(), TrexError> {
         "assemble complete"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{primary_stdout_target_count, AssembleOutputs};
+
+    #[test]
+    fn counts_primary_stdout_targets() {
+        let outputs = AssembleOutputs {
+            out_dir: PathBuf::from("out"),
+            unitigs_fasta: PathBuf::from("-"),
+            contigs_fasta: PathBuf::from("contigs.fa"),
+            gfa_path: PathBuf::from("-"),
+        };
+
+        assert_eq!(primary_stdout_target_count(&outputs), 2);
+    }
 }

@@ -18,6 +18,8 @@ pub mod preprocess;
 pub mod promotion;
 pub mod read;
 pub mod scaffold;
+pub mod scaffold_path;
+pub mod scaffold_projection;
 pub mod scaffold_promotion;
 pub mod stage;
 pub mod trust;

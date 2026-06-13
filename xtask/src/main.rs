@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -9,11 +9,22 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use trex::kmer::{
+    acgt_windows, CanonicalKmerCounts, CanonicalKmerSet, PackedCanonicalKmerCounts,
+    PackedCanonicalKmerSet,
+};
 
 type DynResult<T> = Result<T, Box<dyn Error>>;
 
 mod bench_harness;
+mod data_fetch;
+use bench_harness::run_bench;
+#[cfg(test)]
 use bench_harness::BenchmarkHarness;
+use data_fetch::{
+    curl_gzip_prefix_lines_to_file, curl_gzip_to_file, curl_to_file,
+    extract_interval_pair_with_samtools,
+};
 
 #[derive(Parser)]
 #[command(name = "xtask", version, about = "Trex repository automation")]
@@ -398,6 +409,7 @@ struct AssemblyMetrics {
     fragmentation: Option<Value>,
     audit: Option<Value>,
     diploid: Option<Value>,
+    stages: Option<Value>,
     reference_quality: Option<ReferenceQuality>,
     parental_reference_quality: Vec<NamedReferenceQuality>,
     confident_region_quality: Option<ConfidentRegionQuality>,
@@ -1535,118 +1547,6 @@ fn validate_framework_list(
     Ok(())
 }
 
-fn run_bench(root: &Path, tier: Tier, row_filter: Option<&str>, out: &Path) -> DynResult<()> {
-    validate_matrix(root)?;
-    let matrix = load_matrix(root)?;
-    let harness = BenchmarkHarness::new(root);
-    let mut rows = Vec::new();
-    let mut failed = false;
-    let mut matched_filter = false;
-
-    for row in &matrix.rows {
-        let row_id = row.id.clone().ok_or("validated row missing id")?;
-        if row_filter.map(|filter| filter != row_id).unwrap_or(false) {
-            continue;
-        }
-        matched_filter = true;
-        let ci_tier = row.ci_tier.ok_or("validated row missing ci_tier")?;
-        let product_claim = row
-            .product_claim
-            .clone()
-            .ok_or("validated row missing product_claim")?;
-        let claim_level = row
-            .claim_level
-            .clone()
-            .ok_or("validated row missing claim_level")?;
-        let reference_availability = row
-            .reference_availability
-            .clone()
-            .ok_or("validated row missing reference_availability")?;
-        let artifact_policy = row
-            .artifact_policy
-            .clone()
-            .ok_or("validated row missing artifact_policy")?;
-        let comparison_threads = row.comparison_threads;
-        let tools = harness.tool_availability(
-            row.required_tools.as_deref().unwrap_or(&[]),
-            row.optional_tools.as_deref().unwrap_or(&[]),
-        );
-        let missing_required_tools = !tools.required_unavailable.is_empty();
-        if missing_required_tools {
-            failed = true;
-        }
-        let scripts = scripts_for_tier(row, tier);
-        let should_run_trex = row
-            .trex
-            .as_ref()
-            .map(|trex| trex.tiers.contains(&tier))
-            .unwrap_or(false);
-        if scripts.is_empty() && !should_run_trex {
-            continue;
-        }
-
-        let mut script_reports = Vec::new();
-        if !missing_required_tools {
-            for script in scripts {
-                let report = run_script(root, script)?;
-                if !report.success {
-                    failed = true;
-                }
-                script_reports.push(report);
-            }
-        }
-
-        let mut trex_reports = Vec::new();
-        if !missing_required_tools {
-            if let Some(trex) = row.trex.as_ref() {
-                if should_run_trex {
-                    let report = run_trex_bench(root, trex)?;
-                    let quast_failed = report
-                        .quast
-                        .as_ref()
-                        .map(|quast| !quast.success)
-                        .unwrap_or(false);
-                    if !report.success || quast_failed {
-                        failed = true;
-                    }
-                    trex_reports.push(report);
-                }
-            }
-        }
-        let layer_status = harness.row_layer_status(&tools, &script_reports, &trex_reports);
-
-        let artifacts = harness.artifact_reports(artifacts_for_tier(row, tier));
-
-        rows.push(BenchRowReport {
-            id: row_id,
-            ci_tier,
-            product_claim,
-            claim_level,
-            reference_availability,
-            artifact_policy,
-            comparison_threads,
-            tools,
-            layer_status,
-            scripts: script_reports,
-            trex_runs: trex_reports,
-            artifacts,
-        });
-    }
-    if let Some(filter) = row_filter {
-        if !matched_filter {
-            return Err(format!("xtask bench: row {filter:?} not found").into());
-        }
-    }
-
-    let out_path = harness.write_report(tier, rows, out)?;
-    println!("xtask bench: wrote {}", out_path.display());
-
-    if failed {
-        return Err("xtask bench: one or more rows failed".into());
-    }
-    Ok(())
-}
-
 fn run_gate(root: &Path, tier: Tier) -> DynResult<()> {
     validate_matrix(root)?;
     validate_capabilities(root)?;
@@ -2014,6 +1914,7 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let fragmentation = json_summary_optional(&out_dir.join("fragmentation.json"))?;
     let audit = json_summary_optional(&out_dir.join("audit.json"))?;
     let diploid = json_summary_optional(&out_dir.join("diploid.json"))?;
+    let stages = json_summary_optional(&out_dir.join("stages.json"))?;
     let reference_quality = match (trex.reference.as_deref(), kmer_size) {
         (Some(reference_path), Some(k)) => {
             let contigs_path = out_dir.join("contigs.fa");
@@ -2118,6 +2019,7 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
         fragmentation,
         audit,
         diploid,
+        stages,
         reference_quality,
         parental_reference_quality,
         confident_region_quality,
@@ -2793,7 +2695,7 @@ fn reference_quality_from_sequences(
         return quality;
     }
 
-    let reference_kmers = canonical_kmer_set(reference, k);
+    let reference_kmers = CanonicalKmerSet::from_sequences(reference, k);
     let mut contig_kmers = 0usize;
     let mut contig_kmers_in_reference = 0usize;
     let mut contigs_with_reference_hit = 0usize;
@@ -2805,7 +2707,7 @@ fn reference_quality_from_sequences(
         let mut has_hit = false;
         for window in acgt_windows(contig, k) {
             contig_kmers += 1;
-            if reference_kmers.contains(&canonical_kmer(window)) {
+            if reference_kmers.contains_window(window) {
                 contig_kmers_in_reference += 1;
                 has_hit = true;
             }
@@ -2839,11 +2741,7 @@ fn reference_quality_from_sequences_packed(
     contigs: &[Vec<u8>],
     k: usize,
 ) -> Option<ReferenceQuality> {
-    if !packed_kmer_supported(k) {
-        return None;
-    }
-
-    let reference_kmers = canonical_packed_kmer_set(reference, k);
+    let reference_kmers = PackedCanonicalKmerSet::from_sequences(reference, k)?;
     let mut contig_kmers = 0usize;
     let mut contig_kmers_in_reference = 0usize;
     let mut contigs_with_reference_hit = 0usize;
@@ -2855,10 +2753,7 @@ fn reference_quality_from_sequences_packed(
         let mut has_hit = false;
         for window in acgt_windows(contig, k) {
             contig_kmers += 1;
-            if canonical_packed_kmer(window, k)
-                .map(|kmer| reference_kmers.contains(&kmer))
-                .unwrap_or(false)
-            {
+            if reference_kmers.contains_window(window, k) {
                 contig_kmers_in_reference += 1;
                 has_hit = true;
             }
@@ -2932,37 +2827,37 @@ fn read_assembly_kmer_quality_from_sequences(
         return quality;
     }
 
-    let read_counts = canonical_kmer_counts(reads, k);
-    let assembly_counts = canonical_kmer_counts(assembly, k);
+    let read_counts = CanonicalKmerCounts::from_sequences(reads, k);
+    let assembly_counts = CanonicalKmerCounts::from_sequences(assembly, k);
     let reliable_read_kmers = read_counts
         .values()
-        .filter(|count| **count >= reliable_threshold)
+        .filter(|count| *count as usize >= reliable_threshold)
         .count();
     let reliable_read_kmers_in_assembly = read_counts
         .iter()
         .filter(|(kmer, count)| {
-            **count >= reliable_threshold && assembly_counts.contains_key(*kmer)
+            *count as usize >= reliable_threshold && assembly_counts.contains_key(kmer)
         })
         .count();
     let assembly_only_kmers = assembly_counts
-        .keys()
+        .iter()
         .filter(|kmer| {
             read_counts
-                .get(*kmer)
-                .map(|count| *count < reliable_threshold)
+                .get_key(kmer.0)
+                .map(|count| (count as usize) < reliable_threshold)
                 .unwrap_or(true)
         })
         .count();
-    let assembly_total_kmers: usize = assembly_counts.values().sum();
+    let assembly_total_kmers = assembly_counts.total() as usize;
     let assembly_only_total_kmers: usize = assembly_counts
         .iter()
         .filter(|(kmer, _count)| {
             read_counts
-                .get(*kmer)
-                .map(|count| *count < reliable_threshold)
+                .get_key(kmer)
+                .map(|count| (count as usize) < reliable_threshold)
                 .unwrap_or(true)
         })
-        .map(|(_kmer, count)| *count)
+        .map(|(_kmer, count)| count as usize)
         .sum();
     let reliable_read_containment_fraction =
         fraction(reliable_read_kmers_in_assembly, reliable_read_kmers);
@@ -2998,41 +2893,37 @@ fn read_assembly_kmer_quality_from_sequences_packed(
     k: usize,
     reliable_threshold: usize,
 ) -> Option<ReadAssemblyKmerQuality> {
-    if !packed_kmer_supported(k) {
-        return None;
-    }
-
-    let read_counts = canonical_packed_kmer_counts(reads, k);
-    let assembly_counts = canonical_packed_kmer_counts(assembly, k);
+    let read_counts = PackedCanonicalKmerCounts::from_sequences(reads, k)?;
+    let assembly_counts = PackedCanonicalKmerCounts::from_sequences(assembly, k)?;
     let reliable_read_kmers = read_counts
         .values()
-        .filter(|count| **count >= reliable_threshold)
+        .filter(|count| *count as usize >= reliable_threshold)
         .count();
     let reliable_read_kmers_in_assembly = read_counts
         .iter()
         .filter(|(kmer, count)| {
-            **count >= reliable_threshold && assembly_counts.contains_key(*kmer)
+            *count as usize >= reliable_threshold && assembly_counts.contains_key(*kmer)
         })
         .count();
     let assembly_only_kmers = assembly_counts
         .keys()
         .filter(|kmer| {
             read_counts
-                .get(*kmer)
-                .map(|count| *count < reliable_threshold)
+                .get_key(*kmer)
+                .map(|count| (count as usize) < reliable_threshold)
                 .unwrap_or(true)
         })
         .count();
-    let assembly_total_kmers: usize = assembly_counts.values().sum();
+    let assembly_total_kmers = assembly_counts.total() as usize;
     let assembly_only_total_kmers: usize = assembly_counts
         .iter()
         .filter(|(kmer, _count)| {
             read_counts
-                .get(*kmer)
-                .map(|count| *count < reliable_threshold)
+                .get_key(*kmer)
+                .map(|count| (count as usize) < reliable_threshold)
                 .unwrap_or(true)
         })
-        .map(|(_kmer, count)| *count)
+        .map(|(_kmer, count)| count as usize)
         .sum();
     let reliable_read_containment_fraction =
         fraction(reliable_read_kmers_in_assembly, reliable_read_kmers);
@@ -3062,130 +2953,12 @@ fn read_assembly_kmer_quality_from_sequences_packed(
     })
 }
 
-fn canonical_kmer_counts(seqs: &[Vec<u8>], k: usize) -> HashMap<Vec<u8>, usize> {
-    let mut out = HashMap::new();
-    if k == 0 {
-        return out;
-    }
-    for seq in seqs {
-        for window in acgt_windows(seq, k) {
-            *out.entry(canonical_kmer(window)).or_insert(0) += 1;
-        }
-    }
-    out
-}
-
-fn canonical_packed_kmer_counts(seqs: &[Vec<u8>], k: usize) -> HashMap<u64, usize> {
-    let mut out = HashMap::new();
-    if !packed_kmer_supported(k) {
-        return out;
-    }
-    for seq in seqs {
-        for window in acgt_windows(seq, k) {
-            if let Some(kmer) = canonical_packed_kmer(window, k) {
-                *out.entry(kmer).or_insert(0) += 1;
-            }
-        }
-    }
-    out
-}
-
 fn fraction(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
         0.0
     } else {
         numerator as f64 / denominator as f64
     }
-}
-
-fn canonical_kmer_set(seqs: &[Vec<u8>], k: usize) -> HashSet<Vec<u8>> {
-    let mut out = HashSet::new();
-    if k == 0 {
-        return out;
-    }
-    for seq in seqs {
-        for window in acgt_windows(seq, k) {
-            out.insert(canonical_kmer(window));
-        }
-    }
-    out
-}
-
-fn canonical_packed_kmer_set(seqs: &[Vec<u8>], k: usize) -> HashSet<u64> {
-    let mut out = HashSet::new();
-    if !packed_kmer_supported(k) {
-        return out;
-    }
-    for seq in seqs {
-        for window in acgt_windows(seq, k) {
-            if let Some(kmer) = canonical_packed_kmer(window, k) {
-                out.insert(kmer);
-            }
-        }
-    }
-    out
-}
-
-fn acgt_windows(seq: &[u8], k: usize) -> impl Iterator<Item = &[u8]> {
-    seq.windows(k).filter(|window| {
-        window
-            .iter()
-            .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T'))
-    })
-}
-
-fn packed_kmer_supported(k: usize) -> bool {
-    (1..=32).contains(&k)
-}
-
-fn canonical_packed_kmer(window: &[u8], k: usize) -> Option<u64> {
-    if window.len() != k || !packed_kmer_supported(k) {
-        return None;
-    }
-
-    let mut forward = 0u64;
-    for base in window {
-        forward = (forward << 2) | base_bits(*base)?;
-    }
-
-    let mut reverse = 0u64;
-    for base in window.iter().rev() {
-        reverse = (reverse << 2) | (base_bits(*base)? ^ 0b11);
-    }
-
-    Some(forward.min(reverse))
-}
-
-fn base_bits(base: u8) -> Option<u64> {
-    match base {
-        b'A' | b'a' => Some(0),
-        b'C' | b'c' => Some(1),
-        b'G' | b'g' => Some(2),
-        b'T' | b't' => Some(3),
-        _ => None,
-    }
-}
-
-fn canonical_kmer(window: &[u8]) -> Vec<u8> {
-    let rc = reverse_complement(window);
-    if window <= rc.as_slice() {
-        window.to_vec()
-    } else {
-        rc
-    }
-}
-
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|b| match b {
-            b'A' => b'T',
-            b'C' => b'G',
-            b'G' => b'C',
-            b'T' => b'A',
-            _ => b'N',
-        })
-        .collect()
 }
 
 fn fetch_data(root: &Path, dataset_filter: Option<&str>) -> DynResult<()> {
@@ -3495,17 +3268,14 @@ fn fetch_interval_pair(
         let _ = fs::remove_file(path);
     }
 
-    let script = format!(
-        "samtools view -u -f 3 -F 2304 '{}' '{}' | samtools collate -u -O - | samtools fastq -n -1 '{}' -2 '{}' -0 '{}' -s '{}' -",
-        source.url,
-        pair.region,
-        r1_all.display(),
-        r2_all.display(),
-        other.display(),
-        singleton.display()
-    );
-    let status = Command::new("bash").arg("-c").arg(&script).status()?;
-    if !status.success() {
+    if !extract_interval_pair_with_samtools(
+        &source.url,
+        &pair.region,
+        &r1_all,
+        &r2_all,
+        &other,
+        &singleton,
+    )? {
         return Err(format!(
             "xtask fetch-data: {} {} interval extraction failed",
             dataset.id, pair.role
@@ -3632,17 +3402,12 @@ fn stream_reference_fasta(reference: &DataReference, out_path: &Path) -> DynResu
         fs::create_dir_all(parent)?;
     }
     let tmp = out_path.with_extension("tmp");
-    let script = if reference.url.ends_with(".gz") {
-        format!(
-            "curl -fsSL '{}' | gzip -dc > '{}'",
-            reference.url,
-            tmp.display()
-        )
+    let ok = if reference.url.ends_with(".gz") {
+        curl_gzip_to_file(&reference.url, &tmp)?
     } else {
-        format!("curl -fsSL '{}' > '{}'", reference.url, tmp.display())
+        curl_to_file(&reference.url, &tmp)?
     };
-    let status = Command::new("bash").arg("-c").arg(&script).status()?;
-    if !status.success() {
+    if !ok {
         let _ = fs::remove_file(&tmp);
         return Err(format!("fetch failed for {}", reference.url).into());
     }
@@ -3655,9 +3420,7 @@ fn stream_opaque_file(url: &str, out_path: &Path) -> DynResult<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = out_path.with_extension("tmp");
-    let script = format!("curl -fsSL '{}' > '{}'", url, tmp.display());
-    let status = Command::new("bash").arg("-c").arg(&script).status()?;
-    if !status.success() {
+    if !curl_to_file(url, &tmp)? {
         let _ = fs::remove_file(&tmp);
         return Err(format!("fetch failed for {url}").into());
     }
@@ -3673,15 +3436,7 @@ fn stream_fastq_prefix(source: &DataFile, out_path: &Path, records: usize) -> Dy
         fs::create_dir_all(parent)?;
     }
     let tmp = out_path.with_extension("tmp");
-    let script = format!(
-        "curl -fsSL '{}' 2> >(grep -v 'Failure writing output to destination' >&2) | gzip -dc | awk 'NR <= {} {{ print }} NR == {} {{ exit }}' > '{}'",
-        source.url,
-        lines,
-        lines,
-        tmp.display()
-    );
-    let status = Command::new("bash").arg("-c").arg(&script).status()?;
-    if !status.success() {
+    if !curl_gzip_prefix_lines_to_file(&source.url, lines, &tmp)? {
         let _ = fs::remove_file(&tmp);
         return Err(format!("fetch failed for {}", source.url).into());
     }
