@@ -346,6 +346,8 @@ struct ScriptReport {
 #[derive(Serialize)]
 struct TrexRunReport {
     command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_resume: Option<TrexBenchCheckpointResume>,
     exit_code: Option<i32>,
     success: bool,
     wall_ms: u128,
@@ -354,6 +356,13 @@ struct TrexRunReport {
     observed: Option<TrexObserved>,
     metrics: Option<AssemblyMetrics>,
     quast: Option<ScriptReport>,
+}
+
+#[derive(Serialize)]
+struct TrexBenchCheckpointResume {
+    env: String,
+    checkpoint_root: String,
+    preserved_outputs: bool,
 }
 
 #[derive(Serialize)]
@@ -369,6 +378,8 @@ struct TrexObserved {
 struct AssemblyMetrics {
     kmer_size: Option<usize>,
     candidate_kmers: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    metric_notes: Vec<String>,
     reads: Option<FastqStats>,
     r2_reads: Option<FastqStats>,
     reference: Option<FastaStats>,
@@ -1935,15 +1946,57 @@ fn artifacts_for_tier(row: &Row, tier: Tier) -> Vec<&String> {
     artifacts
 }
 
+fn trex_bench_command(trex: &TrexBench, resume: Option<&TrexBenchCheckpointResume>) -> Vec<String> {
+    let mut command = vec!["target/release/trex".to_string()];
+    command.extend(trex.args.clone());
+    if let Some(resume) = resume {
+        if value_after(&command, "--checkpoint-root").is_none() {
+            command.push("--checkpoint-root".to_string());
+            command.push(resume.checkpoint_root.clone());
+        }
+        if !arg_present(&command, "--resume") && !arg_present(&command, "--no-resume") {
+            command.push("--resume".to_string());
+        }
+    }
+    command
+}
+
+fn trex_bench_checkpoint_resume(trex: &TrexBench) -> Option<TrexBenchCheckpointResume> {
+    if !env_truthy("TREX_XTASK_BENCH_RESUME") {
+        return None;
+    }
+    let checkpoint_root = value_after(&trex.args, "--checkpoint-root")
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            Path::new(&trex.out_dir)
+                .join("checkpoints")
+                .to_string_lossy()
+                .into_owned()
+        });
+    Some(TrexBenchCheckpointResume {
+        env: "TREX_XTASK_BENCH_RESUME".to_string(),
+        checkpoint_root,
+        preserved_outputs: true,
+    })
+}
+
+fn arg_present(args: &[String], needle: &str) -> bool {
+    args.iter().any(|arg| arg == needle)
+}
+
 fn run_trex_bench(root: &Path, trex: &TrexBench) -> DynResult<TrexRunReport> {
     run_command_passthrough(
         root,
         "cargo",
         &["build", "-q", "--release", "-p", "trex-cli"],
     )?;
-    let mut command = vec!["target/release/trex".to_string()];
-    command.extend(trex.args.clone());
-    clean_trex_bench_outputs(root, trex)?;
+    let resume = trex_bench_checkpoint_resume(trex);
+    let command = trex_bench_command(trex, resume.as_ref());
+    if resume.is_some() {
+        println!("xtask bench: preserving Trex outputs/checkpoints for checkpoint resume dev loop");
+    } else {
+        clean_trex_bench_outputs(root, trex)?;
+    }
 
     println!("xtask bench: running {}", command.join(" "));
     let start = std::time::Instant::now();
@@ -1989,6 +2042,7 @@ fn run_trex_bench(root: &Path, trex: &TrexBench) -> DynResult<TrexRunReport> {
     };
     Ok(TrexRunReport {
         command,
+        checkpoint_resume: resume,
         exit_code: output.status.code(),
         success: output.status.success(),
         wall_ms,
@@ -2002,6 +2056,7 @@ fn run_trex_bench(root: &Path, trex: &TrexBench) -> DynResult<TrexRunReport> {
 
 fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics> {
     let out_dir = root.join(&trex.out_dir);
+    let mut metric_notes = Vec::new();
     let kmer_size =
         value_after(&trex.args, "--kmer-size").and_then(|value| value.parse::<usize>().ok());
     let reads = value_after(&trex.args, "--r1")
@@ -2038,10 +2093,27 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     let audit = json_summary_optional(&out_dir.join("audit.json"))?;
     let diploid = json_summary_optional(&out_dir.join("diploid.json"))?;
     let reference_quality = match (trex.reference.as_deref(), kmer_size) {
-        (Some(reference), Some(k)) => {
+        (Some(reference_path), Some(k)) => {
             let contigs_path = out_dir.join("contigs.fa");
             if contigs_path.exists() {
-                Some(reference_quality(&root.join(reference), &contigs_path, k)?)
+                match (
+                    reference.as_ref().map(|stats| stats.total_bases),
+                    reference_quality_base_limit(),
+                ) {
+                    (Some(reference_bases), Some(limit)) if reference_bases > limit => {
+                        metric_notes.push(format!(
+                            "reference_quality skipped: reference_bases={} exceeds TREX_XTASK_REFERENCE_KMER_QUALITY_MAX_BASES={} (set TREX_XTASK_FULL_REFERENCE_KMER_QUALITY=1 for exact scoring)",
+                            reference_bases,
+                            limit
+                        ));
+                        None
+                    }
+                    _ => Some(reference_quality(
+                        &root.join(reference_path),
+                        &contigs_path,
+                        k,
+                    )?),
+                }
             } else {
                 None
             }
@@ -2081,13 +2153,23 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
                 let reliable_threshold = value_after(&trex.args, "--trusted-threshold")
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(2);
-                Some(read_assembly_kmer_quality(
-                    root,
-                    &trex.args,
-                    &contigs_path,
-                    k,
-                    reliable_threshold,
-                )?)
+                match read_assembly_quality_candidate_limit() {
+                    Some(limit) if candidate_kmers.unwrap_or(0) > limit => {
+                        metric_notes.push(format!(
+                            "read_assembly_quality skipped: candidate_kmers={} exceeds TREX_XTASK_READ_KMER_QUALITY_MAX={} (set TREX_XTASK_FULL_READ_KMER_QUALITY=1 for exact scoring)",
+                            candidate_kmers.unwrap_or(0),
+                            limit
+                        ));
+                        None
+                    }
+                    _ => Some(read_assembly_kmer_quality(
+                        root,
+                        &trex.args,
+                        &contigs_path,
+                        k,
+                        reliable_threshold,
+                    )?),
+                }
             } else {
                 None
             }
@@ -2097,6 +2179,7 @@ fn assembly_metrics(root: &Path, trex: &TrexBench) -> DynResult<AssemblyMetrics>
     Ok(AssemblyMetrics {
         kmer_size,
         candidate_kmers,
+        metric_notes,
         reads,
         r2_reads,
         reference,
@@ -2239,6 +2322,35 @@ fn run_optional_quast(root: &Path, trex: &TrexBench) -> DynResult<Option<ScriptR
         time_seconds,
         max_rss_kib,
     }))
+}
+
+const DEFAULT_READ_ASSEMBLY_KMER_QUALITY_MAX_CANDIDATE_KMERS: usize = 20_000_000;
+const DEFAULT_REFERENCE_KMER_QUALITY_MAX_BASES: usize = 20_000_000;
+
+fn read_assembly_quality_candidate_limit() -> Option<usize> {
+    if env_truthy("TREX_XTASK_FULL_READ_KMER_QUALITY") {
+        return None;
+    }
+    std::env::var("TREX_XTASK_READ_KMER_QUALITY_MAX")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .or(Some(DEFAULT_READ_ASSEMBLY_KMER_QUALITY_MAX_CANDIDATE_KMERS))
+}
+
+fn reference_quality_base_limit() -> Option<usize> {
+    if env_truthy("TREX_XTASK_FULL_REFERENCE_KMER_QUALITY") {
+        return None;
+    }
+    std::env::var("TREX_XTASK_REFERENCE_KMER_QUALITY_MAX_BASES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .or(Some(DEFAULT_REFERENCE_KMER_QUALITY_MAX_BASES))
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 fn clean_trex_bench_outputs(root: &Path, trex: &TrexBench) -> DynResult<()> {
@@ -2755,6 +2867,10 @@ fn reference_quality_from_sequences(
     contigs: &[Vec<u8>],
     k: usize,
 ) -> ReferenceQuality {
+    if let Some(quality) = reference_quality_from_sequences_packed(reference, contigs, k) {
+        return quality;
+    }
+
     let reference_kmers = canonical_kmer_set(reference, k);
     let mut contig_kmers = 0usize;
     let mut contig_kmers_in_reference = 0usize;
@@ -2794,6 +2910,53 @@ fn reference_quality_from_sequences(
         contig_bases,
         contig_bases_with_reference_hit,
     }
+}
+
+fn reference_quality_from_sequences_packed(
+    reference: &[Vec<u8>],
+    contigs: &[Vec<u8>],
+    k: usize,
+) -> Option<ReferenceQuality> {
+    if !packed_kmer_supported(k) {
+        return None;
+    }
+
+    let reference_kmers = canonical_packed_kmer_set(reference, k);
+    let mut contig_kmers = 0usize;
+    let mut contig_kmers_in_reference = 0usize;
+    let mut contigs_with_reference_hit = 0usize;
+    let mut contig_bases = 0usize;
+    let mut contig_bases_with_reference_hit = 0usize;
+
+    for contig in contigs {
+        contig_bases += contig.len();
+        let mut has_hit = false;
+        for window in acgt_windows(contig, k) {
+            contig_kmers += 1;
+            if canonical_packed_kmer(window, k)
+                .map(|kmer| reference_kmers.contains(&kmer))
+                .unwrap_or(false)
+            {
+                contig_kmers_in_reference += 1;
+                has_hit = true;
+            }
+        }
+        if has_hit {
+            contigs_with_reference_hit += 1;
+            contig_bases_with_reference_hit += contig.len();
+        }
+    }
+
+    Some(ReferenceQuality {
+        kmer_size: k,
+        contig_kmers,
+        contig_kmers_in_reference,
+        contig_kmer_reference_fraction: fraction(contig_kmers_in_reference, contig_kmers),
+        contigs_with_reference_hit,
+        contig_records: contigs.len(),
+        contig_bases,
+        contig_bases_with_reference_hit,
+    })
 }
 
 fn read_assembly_kmer_quality(
@@ -2841,6 +3004,12 @@ fn read_assembly_kmer_quality_from_sequences(
     k: usize,
     reliable_threshold: usize,
 ) -> ReadAssemblyKmerQuality {
+    if let Some(quality) =
+        read_assembly_kmer_quality_from_sequences_packed(reads, assembly, k, reliable_threshold)
+    {
+        return quality;
+    }
+
     let read_counts = canonical_kmer_counts(reads, k);
     let assembly_counts = canonical_kmer_counts(assembly, k);
     let reliable_read_kmers = read_counts
@@ -2901,6 +3070,76 @@ fn read_assembly_kmer_quality_from_sequences(
     }
 }
 
+fn read_assembly_kmer_quality_from_sequences_packed(
+    reads: &[Vec<u8>],
+    assembly: &[Vec<u8>],
+    k: usize,
+    reliable_threshold: usize,
+) -> Option<ReadAssemblyKmerQuality> {
+    if !packed_kmer_supported(k) {
+        return None;
+    }
+
+    let read_counts = canonical_packed_kmer_counts(reads, k);
+    let assembly_counts = canonical_packed_kmer_counts(assembly, k);
+    let reliable_read_kmers = read_counts
+        .values()
+        .filter(|count| **count >= reliable_threshold)
+        .count();
+    let reliable_read_kmers_in_assembly = read_counts
+        .iter()
+        .filter(|(kmer, count)| {
+            **count >= reliable_threshold && assembly_counts.contains_key(*kmer)
+        })
+        .count();
+    let assembly_only_kmers = assembly_counts
+        .keys()
+        .filter(|kmer| {
+            read_counts
+                .get(*kmer)
+                .map(|count| *count < reliable_threshold)
+                .unwrap_or(true)
+        })
+        .count();
+    let assembly_total_kmers: usize = assembly_counts.values().sum();
+    let assembly_only_total_kmers: usize = assembly_counts
+        .iter()
+        .filter(|(kmer, _count)| {
+            read_counts
+                .get(*kmer)
+                .map(|count| *count < reliable_threshold)
+                .unwrap_or(true)
+        })
+        .map(|(_kmer, count)| *count)
+        .sum();
+    let reliable_read_containment_fraction =
+        fraction(reliable_read_kmers_in_assembly, reliable_read_kmers);
+    let assembly_only_fraction = fraction(assembly_only_kmers, assembly_counts.len());
+    let assembly_only_total_fraction = fraction(assembly_only_total_kmers, assembly_total_kmers);
+    let approximate_qv = if assembly_only_fraction > 0.0 {
+        Some(-10.0 * assembly_only_fraction.log10())
+    } else {
+        None
+    };
+
+    Some(ReadAssemblyKmerQuality {
+        kmer_size: k,
+        reliable_threshold,
+        read_distinct_kmers: read_counts.len(),
+        reliable_read_kmers,
+        assembly_distinct_kmers: assembly_counts.len(),
+        assembly_total_kmers,
+        reliable_read_kmers_in_assembly,
+        reliable_read_containment_fraction,
+        assembly_only_kmers,
+        assembly_only_total_kmers,
+        assembly_only_fraction,
+        assembly_only_total_fraction,
+        qv_error_rate: assembly_only_fraction,
+        approximate_qv,
+    })
+}
+
 fn canonical_kmer_counts(seqs: &[Vec<u8>], k: usize) -> HashMap<Vec<u8>, usize> {
     let mut out = HashMap::new();
     if k == 0 {
@@ -2909,6 +3148,21 @@ fn canonical_kmer_counts(seqs: &[Vec<u8>], k: usize) -> HashMap<Vec<u8>, usize> 
     for seq in seqs {
         for window in acgt_windows(seq, k) {
             *out.entry(canonical_kmer(window)).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+fn canonical_packed_kmer_counts(seqs: &[Vec<u8>], k: usize) -> HashMap<u64, usize> {
+    let mut out = HashMap::new();
+    if !packed_kmer_supported(k) {
+        return out;
+    }
+    for seq in seqs {
+        for window in acgt_windows(seq, k) {
+            if let Some(kmer) = canonical_packed_kmer(window, k) {
+                *out.entry(kmer).or_insert(0) += 1;
+            }
         }
     }
     out
@@ -2935,12 +3189,59 @@ fn canonical_kmer_set(seqs: &[Vec<u8>], k: usize) -> HashSet<Vec<u8>> {
     out
 }
 
+fn canonical_packed_kmer_set(seqs: &[Vec<u8>], k: usize) -> HashSet<u64> {
+    let mut out = HashSet::new();
+    if !packed_kmer_supported(k) {
+        return out;
+    }
+    for seq in seqs {
+        for window in acgt_windows(seq, k) {
+            if let Some(kmer) = canonical_packed_kmer(window, k) {
+                out.insert(kmer);
+            }
+        }
+    }
+    out
+}
+
 fn acgt_windows(seq: &[u8], k: usize) -> impl Iterator<Item = &[u8]> {
     seq.windows(k).filter(|window| {
         window
             .iter()
             .all(|b| matches!(b, b'A' | b'C' | b'G' | b'T'))
     })
+}
+
+fn packed_kmer_supported(k: usize) -> bool {
+    (1..=32).contains(&k)
+}
+
+fn canonical_packed_kmer(window: &[u8], k: usize) -> Option<u64> {
+    if window.len() != k || !packed_kmer_supported(k) {
+        return None;
+    }
+
+    let mut forward = 0u64;
+    for base in window {
+        forward = (forward << 2) | base_bits(*base)?;
+    }
+
+    let mut reverse = 0u64;
+    for base in window.iter().rev() {
+        reverse = (reverse << 2) | (base_bits(*base)? ^ 0b11);
+    }
+
+    Some(forward.min(reverse))
+}
+
+fn base_bits(base: u8) -> Option<u64> {
+    match base {
+        b'A' | b'a' => Some(0),
+        b'C' | b'c' => Some(1),
+        b'G' | b'g' => Some(2),
+        b'T' | b't' => Some(3),
+        _ => None,
+    }
 }
 
 fn canonical_kmer(window: &[u8]) -> Vec<u8> {
@@ -3863,6 +4164,86 @@ mod tests {
 
         assert!(clean_trex_bench_outputs(&root, &trex).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trex_bench_command_injects_resume_checkpoint_args() {
+        let trex = TrexBench {
+            tiers: vec![Tier::Manual],
+            args: vec![
+                "illumina".to_string(),
+                "assemble".to_string(),
+                "--r1".to_string(),
+                "reads.fq".to_string(),
+                "--out-dir".to_string(),
+                "target/benchmarks/example/trex".to_string(),
+            ],
+            out_dir: "target/benchmarks/example/trex".to_string(),
+            reference: None,
+            confident_regions_bed: None,
+            variant_vcf: None,
+            parental_references: Vec::new(),
+        };
+        let resume = TrexBenchCheckpointResume {
+            env: "TREX_XTASK_BENCH_RESUME".to_string(),
+            checkpoint_root: "target/benchmarks/example/trex/checkpoints".to_string(),
+            preserved_outputs: true,
+        };
+
+        let command = trex_bench_command(&trex, Some(&resume));
+
+        assert_eq!(
+            value_after(&command, "--checkpoint-root"),
+            Some("target/benchmarks/example/trex/checkpoints")
+        );
+        assert!(arg_present(&command, "--resume"));
+    }
+
+    #[test]
+    fn trex_bench_command_preserves_existing_checkpoint_args() {
+        let trex = TrexBench {
+            tiers: vec![Tier::Manual],
+            args: vec![
+                "illumina".to_string(),
+                "assemble".to_string(),
+                "--checkpoint-root".to_string(),
+                "target/custom-checkpoints".to_string(),
+                "--resume".to_string(),
+                "--out-dir".to_string(),
+                "target/benchmarks/example/trex".to_string(),
+            ],
+            out_dir: "target/benchmarks/example/trex".to_string(),
+            reference: None,
+            confident_regions_bed: None,
+            variant_vcf: None,
+            parental_references: Vec::new(),
+        };
+        let resume = TrexBenchCheckpointResume {
+            env: "TREX_XTASK_BENCH_RESUME".to_string(),
+            checkpoint_root: "target/custom-checkpoints".to_string(),
+            preserved_outputs: true,
+        };
+
+        let command = trex_bench_command(&trex, Some(&resume));
+
+        assert_eq!(
+            command
+                .iter()
+                .filter(|arg| arg.as_str() == "--checkpoint-root")
+                .count(),
+            1
+        );
+        assert_eq!(
+            command
+                .iter()
+                .filter(|arg| arg.as_str() == "--resume")
+                .count(),
+            1
+        );
+        assert_eq!(
+            value_after(&command, "--checkpoint-root"),
+            Some("target/custom-checkpoints")
+        );
     }
 
     #[test]

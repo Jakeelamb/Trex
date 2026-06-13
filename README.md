@@ -52,6 +52,8 @@ Simplification overrides (defaults scale with *k* unless set): `--max-tip-bases`
 
 Flags: `--checkpoint-root`, `--resume`, `--no-resume`, `--strict-checkpoints`, `--no-strict-checkpoints`, `--kmer-ladder`, `--config` (TOML: optional `[assemble]` table or flat keys; CLI overrides file; `k` may come from the file alone if `--kmer-size` is omitted; a non-empty `k_ladder` can provide the requested baseline when `k` is omitted).
 
+For fast local benchmark iteration, `TREX_XTASK_BENCH_RESUME=1 cargo run -p xtask -- bench ...` preserves the row output directory and injects a checkpoint root under `<out_dir>/checkpoints`; leave it unset for clean comparison runs.
+
 FASTA inputs are detected from path suffixes such as `.fa`, `.fasta`, `.fna` (including `.fa.gz`).
 
 ## Smoke

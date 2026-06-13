@@ -21,7 +21,7 @@ This page is the operator-facing capability matrix. It is validated by `cargo ru
 | Contract validation | `cargo run -p xtask -- validate` | PR, main, tags, schedule, manual | Fails when `tools/benchmark_matrix.toml` lacks required row fields, product claims, claim levels, reference availability, artifact policy, references missing fixtures/scripts, fixture digests drift from `tools/manifest.toml`, `tools/benchmark_data.toml` is malformed, `tools/assembler_framework.toml` references missing papers/code/docs, development protocol docs drift, or this page omits current CLI flags/scripts. |
 | Rust warning gate | `cargo clippy --workspace --all-features -- -D warnings` | PR and above | Keeps core crates, CLI, and Rust automation warning-clean across `1.74.0`, `stable`, and `nightly`. |
 | Rust PR gate | `cargo run -p xtask -- gate --tier pr` | PR and above | Runs validators, Clippy, the PR benchmark artifact, and `scripts/pr_smoke.sh` through the Rust automation entrypoint used by CI. |
-| Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts and direct Trex rows for a tier and writes JSON with row claim metadata, required/optional tool availability, layer status, wall time, exit codes, GNU-time max RSS when available, observed Trex counters, assembly metrics, typed `evidence.json`, `trust.json`, `annotations.json`, `simplification.json`, `scaffolds.json`, `multi_k.json`, `fragmentation.json`, `audit.json`, and `diploid.json` summaries when present, primary contig/unitig and scaffold FASTA stats, distinct and total-weighted read-vs-assembly k-mer quality, parent-specific diploid reference k-mer quality where declared, GIAB-style confident-region / variant truth summaries when BED/VCF truth is declared, and artifact sizes; CI uploads the JSON as a workflow artifact. |
+| Matrix benchmark artifact | `cargo run -p xtask -- bench --tier pr --out target/benchmarks/pr.json` | PR and above | Runs matrix scripts and direct Trex rows for a tier and writes JSON with row claim metadata, required/optional tool availability, layer status, wall time, exit codes, GNU-time max RSS when available, observed Trex counters, assembly metrics, typed `evidence.json`, `trust.json`, `annotations.json`, `simplification.json`, `scaffolds.json`, `multi_k.json`, `fragmentation.json`, `audit.json`, and `diploid.json` summaries when present, primary contig/unitig and scaffold FASTA stats, parent-specific diploid reference k-mer quality where declared, GIAB-style confident-region / variant truth summaries when BED/VCF truth is declared, and artifact sizes. Exact read-vs-assembly and full-reference k-mer quality are emitted for bounded rows and skipped with a `metric_notes` explanation above `TREX_XTASK_READ_KMER_QUALITY_MAX` candidate k-mers or `TREX_XTASK_REFERENCE_KMER_QUALITY_MAX_BASES` reference bases unless `TREX_XTASK_FULL_READ_KMER_QUALITY=1` or `TREX_XTASK_FULL_REFERENCE_KMER_QUALITY=1` is set; CI uploads the JSON as a workflow artifact. |
 | PR smoke | `scripts/pr_smoke.sh` | PR and above | Runs `scripts/ref_free_smoke.sh`, Phase-2 fixture checks, graph summaries, haplotype metrics, and `cargo test --workspace --all-features -q`. |
 | Phase-1 reference-free golden | `scripts/ref_free_smoke.sh` | PR and above | Assembles `fixtures/tiny.fq` and byte-compares `contigs.fa`, `unitigs.fa`, and `graph.gfa` against `fixtures/expected/ref_free_smoke/`. |
 | Phase-1 full benchmark gate | `scripts/benchmark_gate.sh`, `scripts/reference_smoke.sh` | main, tags, schedule, manual | Runs the reference-free golden, then checks contigs against `fixtures/tiny_ref.fa` with minimap2 when installed or substring fallback. |
@@ -74,6 +74,15 @@ cargo run -p xtask -- generate-reads --reference fixtures/phix174/reference.fa -
 ```
 
 The benchmark artifact is intentionally separate from biological quality claims. It proves the governed row ran and records timing/resource metadata; row scripts and direct Trex row metrics decide whether assembly output passed that row's correctness contract.
+
+For fast local development on expensive rows, set `TREX_XTASK_BENCH_RESUME=1` on
+`cargo run -p xtask -- bench ...`. `xtask` then preserves the Trex output
+directory, injects `--checkpoint-root <out_dir>/checkpoints --resume` unless the
+row already declares checkpoint flags, and records `checkpoint_resume` in the
+JSON artifact. This reuses Trex stage outputs under
+`preprocess/reads.jsonl`, `counts/kmer_counts.json`,
+`graph/simplified_dbg.json`, and `export/sequences.json`. Leave the variable
+unset for clean comparison artifacts.
 
 ## Layer Exit Codes
 
